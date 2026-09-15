@@ -2,7 +2,7 @@
 
 A self-healing Meta (Facebook/Instagram) Ads reporting dashboard built on Google Apps Script and Google Sheets — no paid BI tool, no server to host. It pulls Campaign, Ad Set, Ad, and Creative-level data from the Meta Marketing API on a schedule, stores it in Sheets as a durable data layer, and serves an interactive web dashboard on top of it.
 
-**[Live demo](#)** — fake data, fully interactive, no backend required. *(Replace this link once GitHub Pages is enabled — see below.)*
+https://karimwaaaa.github.io/meta-ads-dashboard/ — fake data, fully interactive, no backend required. *(Replace this link once GitHub Pages is enabled — see below.)*
 
 > This is a sanitized copy of a dashboard I built and maintain for a real advertiser. Sheet IDs, the Meta account ID/access token, and the original brand name have been replaced with placeholders; benchmark thresholds have been replaced with illustrative example values. Everything else — the pipeline logic, the rate-limit handling, the caching strategy, the dashboard itself — is the real, working implementation.
 
