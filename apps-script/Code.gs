@@ -570,9 +570,36 @@ function okEmpty_(msg) {
 // sheet," which is effectively always "just now" no matter how stale the underlying import
 // actually is — not useful for answering "can I trust this." This reads the REAL last-
 // success timestamps each pipeline stamps via markPipelineRefreshed_ (in AdSetPipeline.gs,
-// shared by all 4 daily pipelines: Campaigns/Ad Sets/Ads/Creatives), plus each pipeline's
-// active fail-streak where one is tracked, so the dashboard can show an honest "data as of"
-// per tab instead of a number that always looks fresh.
+// shared by all daily pipelines), plus each pipeline's active fail-streak where one is
+// tracked, so the dashboard can show an honest "data as of" per tab instead of a number
+// that always looks fresh.
+//
+// UPDATED (Sep 2026): added adset_placement and adset_agegender. Neither ever called
+// markPipelineRefreshed_ at all until now — the Ad Set breakdown widgets (Performance by
+// Placement, Performance by Age & Gender) had NO freshness signal whatsoever, which is
+// exactly backwards for agegender specifically: it's the one pipeline that can now take
+// more than one daily run to finish (see the resumable-pagination rewrite in
+// AdSetPipeline.gs). A plain "last success" timestamp alone would be misleading while
+// pagination is mid-flight — it would either show a stale timestamp from days ago with no
+// explanation, or (worse) nothing at all — so `catchingUp` is exposed alongside it,
+// read straight from Script Properties via getAdSetAgeGenderCatchupState_() in
+// AdSetPipeline.gs. true means a run stopped partway through fetching pages and hasn't
+// reached the real write yet, so data_adset_agegender is currently behind its own pinned
+// window — a distinct, honest state from both "healthy" and "stale/broken."
+//
+// UPDATED AGAIN (Sep 2026, "creatives hasn't been fetched again" — 4 days stale): turns out
+// importAdCreatives() (AdPipeline.gs) has EXACTLY the same resumable-multi-run pagination
+// shape as adset_agegender above (AD_CREATIVES_RESUME_CURSOR_PROP_ / AD_CREATIVES_PAGINATION_DONE_PROP_
+// — see the RESUMABLE PAGINATION STATE comment block in that file), but was never wired into
+// this "catching up" signal. Concretely, that means: if the account's ad count means a single
+// run can't finish pagination + enrichment inside its time budget (or repeatedly loses ground
+// to Meta's account-level rate limit — see the consecutiveTransientFailures guards in
+// AdPipeline.gs), markPipelineRefreshed_('creatives') is NEVER called across however many days
+// that takes, and the ONLY signal the old code gave you was a plain stale/red chip — visually
+// identical to "the trigger silently died," even though the pipeline is actually still grinding
+// through the backlog one run at a time. AD_CREATIVES_RESUME_CURSOR_PROP_ is a top-level var in
+// AdPipeline.gs, so it's readable directly here with no import (same shared-scope pattern this
+// whole project already relies on) — no need for a dedicated getter function in that file.
 // ═══════════════════════════════════════════════════════════════════════════
 function getPipelineFreshness() {
   var props = PropertiesService.getScriptProperties();
@@ -583,11 +610,28 @@ function getPipelineFreshness() {
     var failStreak = failStreakProp ? (parseInt(props.getProperty(failStreakProp), 10) || 0) : null;
     return { lastSuccess: last, failStreak: failStreak };
   }
+  var agegender = entry('adset_agegender', ADSET_AGEGENDER_FAIL_STREAK_PROP_);
+  // getAdSetAgeGenderCatchupState_ lives in AdSetPipeline.gs — same project, shared scope,
+  // no import needed (see PROJECT_KNOWLEDGE.md's note on ACCOUNT_ID/ACCESS_TOKEN for the
+  // same pattern already relied on elsewhere in this codebase).
+  var catchup = getAdSetAgeGenderCatchupState_();
+  agegender.catchingUp = catchup.inProgress;
+  agegender.windowSince = catchup.windowSince;
+  agegender.windowUntil = catchup.windowUntil;
+
+  var creatives = entry('creatives', null);
+  // No date-windowed pinning for this one (unlike adset_agegender) — importAdCreatives()
+  // takes a full /ads snapshot, not a rolling date range, so there's no windowSince/Until
+  // to surface here. AD_CREATIVES_RESUME_CURSOR_PROP_ is declared in AdPipeline.gs.
+  creatives.catchingUp = !!props.getProperty(AD_CREATIVES_RESUME_CURSOR_PROP_);
+
   return {
     campaigns: entry('campaigns', null),
     adsets:    entry('adsets', ADSET_MAIN_FAIL_STREAK_PROP_),
     ads:       entry('ads', AD_MAIN_FAIL_STREAK_PROP_),
-    creatives: entry('creatives', null)
+    creatives: creatives,
+    adset_placement: entry('adset_placement', ADSET_PLACEMENT_FAIL_STREAK_PROP_),
+    adset_agegender: agegender
   };
 }
 
@@ -1430,6 +1474,18 @@ function getAdData(filters) {
       return a;
     });
 
+    // Sep 2026 (Stage 1, "Unknown ads vanish silently from Video only") — counted BEFORE
+    // the creativeType filter below narrows `ads`, so this reflects everything in the
+    // current date/campaign/ad-set/search scope regardless of which type filter is picked.
+    // The frontend uses this to show a live "(N)" on the new Unknown/Pending filter option
+    // and to decide whether the >5 pending-sync banner should show.
+    var creativeTypeCounts = { Video: 0, Image: 0, Carousel: 0, Unknown: 0 };
+    ads.forEach(function (a) {
+      var t = a.creativeType || 'Unknown';
+      if (creativeTypeCounts[t] === undefined) creativeTypeCounts[t] = 0;
+      creativeTypeCounts[t]++;
+    });
+
     // Sep 2026, "add a filter to be able to look at images only or videos": a.creativeType
     // comes from ad_creatives (classifyCreativeType_ in AdPipeline.gs) — 'Video', 'Image',
     // 'Carousel', or 'Unknown' if that ad's creative row hasn't been synced yet.
@@ -1450,6 +1506,7 @@ function getAdData(filters) {
     var summary = buildSummary_(rows, ads);
     return {
       ads: ads, campaignList: campaignList, adsetList: adsetList, summary: summary,
+      creativeTypeCounts: creativeTypeCounts,
       generatedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm'),
       error: null
     };
@@ -1500,15 +1557,22 @@ var AD_BENCHMARK_BANDS_ = {
     frequency: { dir: 'lower',  bounds: [4.5, 3.0, 2.0] },
     hookRate:  { dir: 'higher', bounds: [20, 30, 40] },
     holdRate:  { dir: 'higher', bounds: [20, 30, 40] },
-    roas:      { dir: 'higher', bounds: [1.5, 3.0, 4.5] }
+    roas:      { dir: 'higher', bounds: [1.5, 3.0, 4.5] },
+    // Cost per Purchase (CPA) is scored too, but it is NOT a fixed placeholder number —
+    // it's deliberately computed per-ad from that ad's own Average Order Value against
+    // the ROAS bounds directly above (Allowable CPA = AOV / Target ROAS), so it never goes
+    // stale when your AOV or margin targets change. bounds:null is a marker;
+    // dynamicFrom:'roas' tells computeAdScorecard_ to derive the three CPA cutoffs on the
+    // fly. dir:'lower' because a lower cost per purchase is better. An ad with no
+    // purchases yet (aov === null) simply isn't scored on this metric.
+    cpa:       { dir: 'lower',  bounds: null, dynamicFrom: 'roas' }
   },
-  // Used when the objective/optimization goal is neither Sales nor Messaging. The PDF's
-  // universal table only gives 3 tiers (Poor/Good/Excellent) for these, so "Good" doubles
-  // as the Average/Good split here — a reasonable reading, not something stated verbatim.
+  // Used when the objective/optimization goal is neither Sales nor Messaging — a "Generic"
+  // fallback for Awareness/Traffic/Leads/etc. [EXAMPLE_THRESHOLDS] throughout, same as above.
   generic: {
-    hookRate: { dir: 'higher', bounds: [25, 35, 45] },
-    holdRate: { dir: 'higher', bounds: [20, 30, 40] },
-    ctrLink:  { dir: 'higher', bounds: [2, 3, 4] }
+    hookRate: { dir: 'higher', bounds: [15, 25, 35] },
+    holdRate: { dir: 'higher', bounds: [15, 25, 35] },
+    ctrLink:  { dir: 'higher', bounds: [1.0, 2.0, 3.0] }
   }
 };
 var AD_BAND_LABELS_ = ['Poor', 'Average', 'Good', 'Excellent'];
@@ -1536,6 +1600,22 @@ function classifyObjectiveGroup_(objective, optimizationGoal) {
 }
 
 function computeAdScorecard_(a) {
+  // Sep 2026 (Stage 1 correctness fix, "stop treating Unknown as if it were an Image"):
+  // 'Unknown' means importAdCreatives() hasn't classified this ad's creative yet — it is
+  // NOT the same thing as a confirmed static image. The old code let 'Unknown' fall
+  // through to the same isVideo=false path as 'Image', which meant Hook Rate/Hold Rate
+  // were silently skipped and a full Winner/Losing verdict + Scale Decision got produced
+  // anyway — built on an assumption (this is a static image) we had no actual basis for.
+  // A genuinely video ad launched since the last completed creatives snapshot could get a
+  // confident-looking "Replace creative" recommendation that never once checked whether
+  // anyone watched past 3 seconds. Now: no classification yet means no verdict and no
+  // Scale Decision at all, full stop — the card says so plainly (pendingSync:true) instead
+  // of quietly guessing. This only ever applies pre-sync; once importAdCreatives() resolves
+  // a real type for this ad, it flows through the normal scoring below on the next load.
+  if (!a.creativeType || a.creativeType === 'Unknown') {
+    return { group: null, percent: null, verdict: 'Creative pending', breakdown: [], decision: null, decisionWhy: null, pendingSync: true };
+  }
+
   var group = classifyObjectiveGroup_(a.objective, a.optimizationGoal);
   var bands = AD_BENCHMARK_BANDS_[group];
   // FIXED (Sep 2026, "static image ads shouldn't have a hook rate and hold rate"): Hook Rate
@@ -1549,14 +1629,23 @@ function computeAdScorecard_(a) {
   var isVideo = a.creativeType === 'Video';
   var metricValues = {
     cpm: a.cpm, ctrLink: a.ctrLink, ctrAll: a.ctrAll, frequency: a.frequency,
-    hookRate: a.hookRate, holdRate: a.holdRate, roas: a.roas, costPerMsg: a.costPerMsg
+    hookRate: a.hookRate, holdRate: a.holdRate, roas: a.roas, costPerMsg: a.costPerMsg,
+    cpa: a.cpa
   };
   var breakdown = [];
   var totalPts = 0, counted = 0;
   Object.keys(bands).forEach(function (key) {
     if (!isVideo && (key === 'hookRate' || key === 'holdRate')) return;
+    var spec = bands[key];
+    if (spec.dynamicFrom) {
+      // cpa (see AD_BENCHMARK_BANDS_.sales.cpa comment): bounds computed per-ad from this
+      // ad's own aov, not a fixed number. No purchases yet -> no aov -> nothing to score.
+      if (a.aov == null || !(a.aov > 0)) return;
+      var baseBounds = bands[spec.dynamicFrom].bounds;
+      spec = { dir: spec.dir, bounds: baseBounds.map(function (r) { return a.aov / r; }) };
+    }
     var val = metricValues[key];
-    var res = classifyBand_(val, bands[key]);
+    var res = classifyBand_(val, spec);
     if (!res) return; // metric not applicable/no data yet (e.g. costPerMsg with no messaging activity)
     breakdown.push({ metric: key, value: val, label: res.label, points: res.points });
     totalPts += res.points; counted++;
@@ -1573,7 +1662,7 @@ function computeAdScorecard_(a) {
   else verdict = 'Losing';
 
   var decision = computeScaleDecision_(group, breakdown, isVideo);
-  return { group: group, percent: percent, verdict: verdict, breakdown: breakdown, decision: decision.action, decisionWhy: decision.why };
+  return { group: group, percent: percent, verdict: verdict, breakdown: breakdown, decision: decision.action, decisionWhy: decision.why, pendingSync: false };
 }
 
 function pointsFor_(breakdown, key) {

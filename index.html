@@ -62,6 +62,13 @@
     .freshness-chip.bad{border-color:var(--bad);background:var(--brand-tint)}
     .freshness-chip.bad .fc-dot{color:var(--bad)}
     .freshness-chip b{color:var(--text-primary);font-weight:700}
+    /* Sep 2026 — "catching up" state: pagination is actively mid-flight across multiple
+       trigger runs (see getAdSetAgeGenderCatchupState_ in AdSetPipeline.gs). This is NOT
+       an error (no red) and NOT confirmed-fresh (no green) — it's its own honest blue
+       "working on it" signal, reusing the brand's meta-blue so it reads as active/in-
+       progress rather than a problem. */
+    .freshness-chip.catching-up{border-color:var(--meta-blue);background:var(--meta-tint)}
+    .freshness-chip.catching-up .fc-dot{color:var(--meta-blue)}
 
     /* ── "Today (Live)" campaign snapshot card (Sep 2026) ──
        Deliberately loud and unmistakably different from the calm strip above: this data
@@ -147,6 +154,14 @@
     .mm{display:flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;color:var(--text-secondary)}
     .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex-shrink:0}
     .dot.good{background:var(--good)} .dot.warn{background:var(--warn)} .dot.bad{background:var(--bad)} .dot.na{background:var(--na)}
+    /* Sep 2026 — Ads table per-metric dots (Engagement/Quality/Conversion Rank columns,
+       Ad Quality Score mini-meter): matches the detail card's 4-tier p0-p3 palette exactly
+       (.ad-metric.p0-p3 above) instead of the old 3-way good/warn/bad, so a Poor ad and an
+       Average ad are distinguishable in the table, not just in the detail card. */
+    .dot.p0{background:var(--bad)}
+    .dot.p1{background:#C77C10}
+    .dot.p2{background:var(--good)}
+    .dot.p3{background:#1E7A3B}
     .charts-grid{display:grid;grid-template-columns:2fr 1fr;gap:20px;margin-bottom:24px}
     .chart-card{background:var(--card-bg);border-radius:var(--radius);padding:20px;box-shadow:var(--shadow);border:1px solid var(--border);border-top:3px solid var(--meta-blue)}
     .card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px}
@@ -170,6 +185,15 @@
     .filter-actions{display:flex;gap:8px;padding-top:4px}
     .btn-apply{padding:9px 22px;background:var(--brand);color:#fff;border:none;border-radius:8px;font-weight:600;font-size:13px;cursor:pointer;transition:var(--transition);box-shadow:0 2px 8px rgba(242,84,91,.3)}
     .btn-apply:hover{background:var(--brand-dark);transform:translateY(-2px)}
+    /* Sep 2026 — inline "is my filter change actually being read" feedback, requested
+       specifically because every filter on the Ad Set/Ads tabs auto-applies on change with
+       no visible confirmation. Sits right next to the Apply/Reset buttons (not just a spinner
+       buried in the table/grid below, which is easy to miss without scrolling) so it's the
+       first thing your eye catches right where you just interacted. */
+    .filter-status{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--meta-blue);margin-left:4px;min-width:0;opacity:0;transition:opacity .15s}
+    .filter-status.show{opacity:1}
+    .filter-status.done{color:var(--good)}
+    .filter-status i{font-size:11px}
     .btn-reset{padding:9px 16px;background:var(--bg);color:var(--text-secondary);border:1px solid var(--border);border-radius:8px;font-weight:500;font-size:13px;cursor:pointer;transition:var(--transition)}
     .btn-reset:hover{background:var(--border)}
     .date-pills{display:flex;gap:6px;align-items:center;margin-top:14px;flex-wrap:wrap}
@@ -241,6 +265,12 @@
     .ad-card.optimize{border-top:3px solid var(--warn)}
     .ad-card.losing{border-top:3px solid var(--bad)}
     .ad-card.na{border-top:3px solid var(--na)}
+    /* Sep 2026 (Stage 1 correctness fix) — 'Unknown' creative type means importAdCreatives()
+       hasn't classified this ad yet, NOT a confirmed static image. Deliberately does NOT
+       reuse .ad-card.na's look (that's for a classified ad that's merely insufficient-data) —
+       a dashed border reads as "nothing to show yet", not "here's a verdict, it's just N/A". */
+    .ad-card.pending{border:1.5px dashed var(--na);border-top:1.5px dashed var(--na)}
+    .ad-verdict.pending{background:var(--bg);color:var(--text-secondary);border:1px dashed var(--border)}
     .ad-thumb-wrap{position:relative;width:100%;aspect-ratio:1/1;background:var(--bg);display:flex;align-items:center;justify-content:center;overflow:hidden}
     .ad-thumb-wrap img{width:100%;height:100%;object-fit:cover;display:block}
     .ad-thumb-placeholder{color:var(--na);font-size:28px}
@@ -398,9 +428,164 @@
     #landingFileSummary{margin-top:14px;font-size:12px;max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
     .landing-file-ok{color:var(--good)} .landing-file-bad{color:var(--bad)}
     .landing-actions{display:flex;gap:10px;margin-top:20px;justify-content:flex-end}
+    /* ── Standard Operating Procedures panel (Sep 2026) ──
+       Reference doc for advertisers: the Master Color Coding legend, the per-objective
+       benchmark bands, the minimum-data gate, and the Scale Decision Matrix — all sourced
+       verbatim from AD_BENCHMARK_BANDS_ / computeAdScorecard_ / computeScaleDecision_ in
+       Code.gs, so this panel can never drift out of sync with what the dashboard actually
+       scores ads against. */
+    .sop-overlay{position:fixed;inset:0;background:rgba(20,24,32,.55);z-index:400;display:none;align-items:flex-start;justify-content:center;padding:40px 20px;overflow-y:auto}
+    .sop-overlay.open{display:flex}
+    .sop-card{background:var(--card-bg);border-radius:16px;padding:28px 32px 32px;box-shadow:0 20px 60px rgba(0,0,0,.35);max-width:880px;width:100%;margin-bottom:40px}
+    .sop-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;border-bottom:1px solid var(--border);padding-bottom:16px;margin-bottom:20px}
+    .sop-card-head h2{font-size:19px;font-weight:800;display:flex;align-items:center;gap:10px}
+    .sop-card-head h2 i{color:var(--brand)}
+    .sop-card-head p{font-size:12.5px;color:var(--text-secondary);margin-top:4px;line-height:1.5}
+    .sop-close-btn{border:1px solid var(--border);background:var(--bg);border-radius:8px;width:32px;height:32px;flex:0 0 auto;cursor:pointer;color:var(--text-secondary);font-size:14px}
+    .sop-close-btn:hover{border-color:var(--brand);color:var(--brand)}
+    .sop-section{margin-bottom:26px}
+    .sop-section:last-child{margin-bottom:0}
+    .sop-section h3{font-size:13.5px;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+    .sop-section h3 i{color:var(--meta-blue);width:16px;text-align:center}
+    .sop-section .sop-sub{font-size:12px;color:var(--text-secondary);margin-bottom:12px;line-height:1.5}
+    .sop-legend{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px}
+    .sop-legend span{font-size:11px;font-weight:700;padding:4px 11px;border-radius:20px}
+    .sop-legend .p0{background:#FCE8EA;color:var(--bad)}
+    .sop-legend .p1{background:#FEF3E0;color:#C77C10}
+    .sop-legend .p2{background:#E4F3E7;color:var(--good)}
+    .sop-legend .p3{background:#DCF3E3;color:#1E7A3B}
+    .sop-table{width:100%;border-collapse:collapse;font-size:11.5px;margin-bottom:4px}
+    .sop-table th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.3px;color:var(--text-secondary);padding:6px 8px;border-bottom:1px solid var(--border)}
+    .sop-table td{padding:7px 8px;border-bottom:1px solid var(--border)}
+    .sop-table tr:last-child td{border-bottom:none}
+    .sop-table td.p0{color:var(--bad);font-weight:600}
+    .sop-table td.p1{color:#C77C10;font-weight:600}
+    .sop-table td.p2{color:var(--good);font-weight:600}
+    .sop-table td.p3{color:#1E7A3B;font-weight:600}
+    .sop-note{background:var(--bg);border:1px solid var(--border);border-left:3px solid var(--meta-blue);border-radius:8px;padding:10px 14px;font-size:11.5px;color:var(--text-secondary);line-height:1.5;margin-top:6px}
+    .sop-decision-list{list-style:none;display:flex;flex-direction:column;gap:8px}
+    .sop-decision-list li{font-size:12px;line-height:1.5;padding:9px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg)}
+    .sop-decision-list b{color:var(--text-primary)}
+    @media (max-width:600px){.sop-table{font-size:10.5px} .sop-card{padding:20px 18px 24px}}
   </style>
 </head>
 <body>
+<div class="sop-overlay" id="sopOverlay">
+  <div class="sop-card">
+    <div class="sop-card-head">
+      <div>
+        <h2><i class="fas fa-book"></i> Standard Operating Procedures</h2>
+        <p>How to read every colored dot, score, and "Scale Decision" on this dashboard &mdash; the exact rules baked into Code.gs, straight from the benchmark PDF (plus a few judgment calls flagged below as ours, not the PDF's).</p>
+      </div>
+      <button class="sop-close-btn" onclick="toggleSOP(event)"><i class="fas fa-xmark"></i></button>
+    </div>
+
+    <div class="sop-section">
+      <h3><i class="fas fa-palette"></i> Master Color Coding</h3>
+      <p class="sop-sub">Every dot, pill, and metric on this dashboard uses the same 4-tier scale. Each ad's metrics are compared against the bands below for its objective group.</p>
+      <div class="sop-legend">
+        <span class="p0">Poor</span>
+        <span class="p1">Average</span>
+        <span class="p2">Good</span>
+        <span class="p3">Excellent</span>
+      </div>
+    </div>
+
+    <div class="sop-section">
+      <h3><i class="fas fa-comment-dots"></i> Messaging campaigns</h3>
+      <p class="sop-sub">Applies to ads whose objective is Messaging / Conversations.</p>
+      <table class="sop-table">
+        <thead><tr><th>Metric</th><th class="p0">Poor</th><th class="p1">Average</th><th class="p2">Good</th><th class="p3">Excellent</th></tr></thead>
+        <tbody>
+          <tr><td>CPM</td><td class="p0">&gt; &#8369;300</td><td class="p1">&#8369;200&ndash;300</td><td class="p2">&#8369;120&ndash;200</td><td class="p3">&lt; &#8369;120</td></tr>
+          <tr><td>CTR (Link)</td><td class="p0">&lt; 1.5%</td><td class="p1">1.5&ndash;2.5%</td><td class="p2">2.5&ndash;4.0%</td><td class="p3">&ge; 4.0%</td></tr>
+          <tr><td>CTR (All)</td><td class="p0">&lt; 3.0%</td><td class="p1">3.0&ndash;5.0%</td><td class="p2">5.0&ndash;8.0%</td><td class="p3">&ge; 8.0%</td></tr>
+          <tr><td>Frequency</td><td class="p0">&gt; 4.0</td><td class="p1">2.5&ndash;4.0</td><td class="p2">1.5&ndash;2.5</td><td class="p3">&lt; 1.5</td></tr>
+          <tr><td>Hook Rate <span style="font-weight:400;color:var(--text-secondary)">(video only)</span></td><td class="p0">&lt; 20%</td><td class="p1">20&ndash;30%</td><td class="p2">30&ndash;40%</td><td class="p3">&ge; 40%</td></tr>
+          <tr><td>Hold Rate <span style="font-weight:400;color:var(--text-secondary)">(video only)</span></td><td class="p0">&lt; 20%</td><td class="p1">20&ndash;30%</td><td class="p2">30&ndash;40%</td><td class="p3">&ge; 40%</td></tr>
+          <tr><td>Cost per Message</td><td class="p0">&gt; &#8369;150</td><td class="p1">&#8369;90&ndash;150</td><td class="p2">&#8369;50&ndash;90</td><td class="p3">&lt; &#8369;50</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="sop-section">
+      <h3><i class="fas fa-cart-shopping"></i> Sales campaigns (Purchase objective)</h3>
+      <p class="sop-sub">Applies to ads optimizing for Purchase / conversion value.</p>
+      <table class="sop-table">
+        <thead><tr><th>Metric</th><th class="p0">Poor</th><th class="p1">Average</th><th class="p2">Good</th><th class="p3">Excellent</th></tr></thead>
+        <tbody>
+          <tr><td>CPM</td><td class="p0">&gt; &#8369;350</td><td class="p1">&#8369;220&ndash;350</td><td class="p2">&#8369;150&ndash;220</td><td class="p3">&lt; &#8369;150</td></tr>
+          <tr><td>CTR (Link)</td><td class="p0">&lt; 1.2%</td><td class="p1">1.2&ndash;2.0%</td><td class="p2">2.0&ndash;3.5%</td><td class="p3">&ge; 3.5%</td></tr>
+          <tr><td>CTR (All)</td><td class="p0">&lt; 2.5%</td><td class="p1">2.5&ndash;4.0%</td><td class="p2">4.0&ndash;6.5%</td><td class="p3">&ge; 6.5%</td></tr>
+          <tr><td>Frequency</td><td class="p0">&gt; 4.5</td><td class="p1">3.0&ndash;4.5</td><td class="p2">2.0&ndash;3.0</td><td class="p3">&lt; 2.0</td></tr>
+          <tr><td>Hook Rate <span style="font-weight:400;color:var(--text-secondary)">(video only)</span></td><td class="p0">&lt; 20%</td><td class="p1">20&ndash;30%</td><td class="p2">30&ndash;40%</td><td class="p3">&ge; 40%</td></tr>
+          <tr><td>Hold Rate <span style="font-weight:400;color:var(--text-secondary)">(video only)</span></td><td class="p0">&lt; 20%</td><td class="p1">20&ndash;30%</td><td class="p2">30&ndash;40%</td><td class="p3">&ge; 40%</td></tr>
+          <tr><td>ROAS</td><td class="p0">&lt; 1.5x</td><td class="p1">1.5&ndash;3.0x</td><td class="p2">3.0&ndash;4.5x</td><td class="p3">&ge; 4.5x</td></tr>
+        </tbody>
+      </table>
+      <div class="sop-note"><b>CPA</b> is scored too, but has no fixed peso number &mdash; it's computed per ad from that ad's own Average Order Value against the ROAS bands above, so it only counts once an ad has at least one purchase.</div>
+    </div>
+
+    <div class="sop-section">
+      <h3><i class="fas fa-bullseye"></i> Generic fallback (any other objective)</h3>
+      <p class="sop-sub">Awareness, Traffic, Leads, or anything that isn't Messaging or Sales. The benchmark PDF only defines 3 tiers here &mdash; "Good" doubles as the Average/Good line.</p>
+      <table class="sop-table">
+        <thead><tr><th>Metric</th><th class="p0">Poor</th><th class="p1">Average</th><th class="p2">Good / Excellent</th></tr></thead>
+        <tbody>
+          <tr><td>Hook Rate <span style="font-weight:400;color:var(--text-secondary)">(video only)</span></td><td class="p0">&lt; 15%</td><td class="p1">15&ndash;25%</td><td class="p2">&ge; 25%</td></tr>
+          <tr><td>Hold Rate <span style="font-weight:400;color:var(--text-secondary)">(video only)</span></td><td class="p0">&lt; 15%</td><td class="p1">15&ndash;25%</td><td class="p2">&ge; 25%</td></tr>
+          <tr><td>CTR (Link)</td><td class="p0">&lt; 1%</td><td class="p1">1&ndash;2%</td><td class="p2">&ge; 3%</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="sop-section">
+      <h3><i class="fas fa-database"></i> Minimum data before judging</h3>
+      <p class="sop-sub">An ad needs at least <b>1,000 impressions</b> before it gets a Poor/Average/Good/Excellent verdict at all &mdash; below that, it's marked <b>&ldquo;Insufficient data&rdquo;</b> instead, so a brand-new or barely-spent ad never gets mislabeled as &ldquo;Losing&rdquo; off noisy early numbers.</p>
+    </div>
+
+    <div class="sop-section">
+      <h3><i class="fas fa-trophy"></i> Overall ad verdict</h3>
+      <p class="sop-sub">Each applicable metric earns 0&ndash;3 points (Poor=0 &hellip; Excellent=3). The ad's score is the percentage of points earned out of the maximum possible for its applicable metrics:</p>
+      <table class="sop-table">
+        <tbody>
+          <tr><td>Winner</td><td class="p3">&ge; 75%</td></tr>
+          <tr><td>Needs optimization</td><td class="p1">45&ndash;74%</td></tr>
+          <tr><td>Losing</td><td class="p0">&lt; 45%</td></tr>
+          <tr><td>Insufficient data</td><td style="color:var(--text-secondary)">&lt; 1,000 impressions, or no applicable metrics yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="sop-section">
+      <h3><i class="fas fa-route"></i> Scale Decision Matrix</h3>
+      <p class="sop-sub">The exact CPM / CTR / Hook / Hold / ROAS &rarr; action table for <b>Sales</b> ads is verbatim from the benchmark PDF. Messaging and the generic fallback are this dashboard's own extrapolation of the same logic &mdash; not stated in the PDF &mdash; flagged here so it's clear which is the benchmark and which is a judgment call layered on top of it.</p>
+      <p class="sop-sub" style="margin-top:14px;margin-bottom:6px"><b>Sales:</b></p>
+      <ul class="sop-decision-list">
+        <li><b>Scale aggressively</b> &mdash; efficient CPM, strong creative signals, and healthy ROAS.</li>
+        <li><b>Improve landing page or offer</b> &mdash; the creative is clearly working, but ROAS is lagging &mdash; the leak is likely after the click.</li>
+        <li><b>New audience + new creative</b> &mdash; high CPM and weak engagement together usually means audience fatigue, not just a bad ad.</li>
+        <li><b>Optimize checkout or pricing</b> &mdash; CPM and creative are both healthy, but ROAS is only average &mdash; check checkout friction or price/offer fit.</li>
+        <li><b>Replace creative</b> &mdash; creative signals are weak across the board.</li>
+        <li><b>Keep testing</b> &mdash; mixed signals, no single lever stands out yet; compare against sibling ads before deciding.</li>
+      </ul>
+      <p class="sop-sub" style="margin-top:14px;margin-bottom:6px"><b>Messaging:</b></p>
+      <ul class="sop-decision-list">
+        <li><b>Scale aggressively</b> &mdash; efficient CPM, strong creative signals, and cheap cost per conversation.</li>
+        <li><b>Speed up / simplify the messaging flow</b> &mdash; people are engaging with the creative, but conversations are expensive &mdash; the drop-off is likely in the chat/response flow, not the ad.</li>
+        <li><b>Replace creative</b> &mdash; creative signals are weak across the board.</li>
+        <li><b>New audience + new creative</b> &mdash; high CPM despite decent engagement usually means the audience is saturated.</li>
+        <li><b>Keep testing</b> &mdash; mixed signals, compare against sibling ads before deciding.</li>
+      </ul>
+      <p class="sop-sub" style="margin-top:14px;margin-bottom:6px"><b>Generic / other objectives</b> <span style="font-weight:400">&mdash; deliberately conservative, since no matrix exists for this bucket in the benchmark doc:</span></p>
+      <ul class="sop-decision-list">
+        <li><b>Scale aggressively</b> &mdash; efficient CPM and strong creative signals.</li>
+        <li><b>Replace creative</b> &mdash; creative signals are weak.</li>
+        <li><b>Keep testing</b> &mdash; everything in between; judge this one against its sibling ads rather than an absolute rule.</li>
+      </ul>
+    </div>
+  </div>
+</div>
 <div class="landing-overlay" id="landingOverlay">
   <div class="landing-card">
     <div id="landingChoice">
@@ -463,6 +648,7 @@
         <div id="archiveStatus" style="font-size:12px;color:var(--text-secondary);margin-top:8px"></div>
       </div>
     </div>
+    <button class="ghost-btn" id="sopToggleBtn" onclick="toggleSOP(event)"><i class="fas fa-book"></i> SOP</button>
     <div class="meta-chip" title="Source: Meta Ads"><i class="fa-brands fa-meta"></i></div>
     <div class="datetime"><i class="fas fa-clock"></i><span id="timeDisplay">&mdash;</span></div>
     <button class="refresh-btn" onclick="refreshActive()"><i class="fas fa-sync-alt"></i> Refresh</button>
@@ -514,7 +700,9 @@
       <input type="date" id="adsetDateTo">
     </div>
     <div class="filter-actions">
+      <button class="btn-apply" onclick="loadAdSetData()"><i class="fas fa-filter"></i> Apply</button>
       <button class="btn-reset" onclick="resetAdSetFilters()"><i class="fas fa-rotate-left"></i> Reset</button>
+      <span class="filter-status" id="adsetFilterStatus"></span>
     </div>
   </div>
 </div>
@@ -536,6 +724,7 @@
         <option value="Video">Video only</option>
         <option value="Image">Image only</option>
         <option value="Carousel">Carousel only</option>
+        <option value="Unknown" id="adsCreativeTypeUnknownOpt">Unknown / Pending (0)</option>
       </select>
     </div>
     <div class="filter-group">
@@ -551,7 +740,9 @@
       <input type="date" id="adsDateTo">
     </div>
     <div class="filter-actions">
+      <button class="btn-apply" onclick="loadAdsData()"><i class="fas fa-filter"></i> Apply</button>
       <button class="btn-reset" onclick="resetAdsFilters()"><i class="fas fa-rotate-left"></i> Reset</button>
+      <span class="filter-status" id="adsFilterStatus"></span>
     </div>
   </div>
   <div class="filters-row" style="margin-top:10px">
@@ -600,6 +791,7 @@
     <div class="filter-actions">
       <button class="btn-apply" onclick="applyFilters()"><i class="fas fa-filter"></i> Apply</button>
       <button class="btn-reset" onclick="resetFilters()"><i class="fas fa-undo"></i> Reset</button>
+      <span class="filter-status" id="campFilterStatus"></span>
     </div>
   </div>
   <div class="date-pills">
@@ -683,7 +875,6 @@
   <div class="chart-note" style="margin-bottom:8px">Grouped, not stacked — ROAS is a ratio, so stacking two ROAS values on top of each other would add ratios together, which isn't a meaningful number. Grouped bars let you compare them side by side instead.</div>
   <div class="chart-container" style="height:300px"><canvas id="agegenderRoasChart"></canvas></div>
 </div>
-
 <div class="section-bar" id="reportSectionBar">
   <h2><i class="fas fa-layer-group"></i> Report Builder</h2>
   <span style="font-size:12px;color:var(--text-secondary)">Pick metric(s) + breakdown dimension(s) &mdash; e.g. "ROAS by Age &amp; Gender" or "Reach by Placement"</span>
@@ -758,10 +949,6 @@
   var sortKey = 'spent', sortDir = 'desc';
   var trendType = 'line', trendChart = null, objectiveChart = null;
   var activePill = null, DATA_MAX_TS = NaN;
-  // ── Archived Year (CSV) view state — see ArchiveTools.gs. Tracked separately per
-  // level since a Campaign archive CSV and an Ad Set archive CSV have different columns.
-  // 'ad' stays permanently mode:false — the Ads tab has no Archived-CSV support yet
-  // (creative thumbnails require a live call to Meta; see the note in Code.gs/getAdData).
   var ARCHIVE = { campaign: { mode:false, csv:null, fileName:'' }, adset: { mode:false, csv:null, fileName:'' }, ad: { mode:false, csv:null, fileName:'' } };
   var ADS = null, adsLoadTimer_ = null;
 
@@ -839,7 +1026,6 @@
 
   function loadLS(key, dflt){ try{ var v=JSON.parse(localStorage.getItem(key)); if(v && v.length){ return v; } }catch(e){} return dflt.slice(); }
   function saveLS(key, val){ try{ localStorage.setItem(key, JSON.stringify(val)); }catch(e){} }
-
   function num(v){ return Number(v)||0; }
   function peso(n){ return '₱' + num(n).toLocaleString('en-PH',{minimumFractionDigits:2,maximumFractionDigits:2}); }
   function compact(n){
@@ -857,8 +1043,13 @@
     return {cls:'bad', label:'Critical - action required'};
   }
   function dotFromAvg(a){ if(a==null) return 'na'; if(a>=2.5) return 'good'; if(a>=1.75) return 'warn'; return 'bad'; }
-  function dotFromPts(p){ if(p==null) return 'na'; if(p===3) return 'good'; if(p===2) return 'warn'; return 'bad'; }
-  function tierLabel(p){ if(p==null) return '–'; if(p===3) return 'Above average'; if(p===2) return 'Average'; return 'Below average'; }
+  // Sep 2026 — dotFromPts/tierLabel now surface all 4 real tiers (Poor/Average/Good/
+  // Excellent) instead of collapsing points 0 and 1 into one "bad" red dot labeled
+  // "Below average". Matches the .dot.p0-p3 CSS above and the .ad-metric.p0-p3 palette
+  // already used on the Ads tab detail card, so the whole dashboard speaks one vocabulary.
+  var TIER_LABELS_ = ['Poor', 'Average', 'Good', 'Excellent'];
+  function dotFromPts(p){ if(p==null) return 'na'; return 'p'+p; }
+  function tierLabel(p){ if(p==null) return '–'; return TIER_LABELS_[p]; }
 
   function renderKPIs(){
     var grid = document.getElementById('kpiGrid');
@@ -942,13 +1133,6 @@
     if(key==='audienceType'){ return 'badge audience'; }
     return 'badge';
   }
-  // "Settling" marker (Sep 2026, date-accuracy ask): the daily pipeline re-fetches and
-  // overwrites the last 7 days on every run to match Meta's 7-day click attribution
-  // window, so a date inside that window may still tick upward (mostly purchases/ROAS)
-  // even though it's already in the sheet. Anything older is final — Meta's own
-  // attribution window has closed on it. reportingEnds itself never includes today (the
-  // daily import only ever runs through yesterday — see importDataFromJSON in
-  // DataPipeline.gs), so this only ever marks yesterday-through-7-days-ago.
   var SETTLING_WINDOW_MS_ = 7*24*60*60*1000;
   function isSettlingDate_(dateStr){
     if(!dateStr) return false;
@@ -1051,14 +1235,9 @@
     visibleCols = on ? DEFAULT_COLS.slice() : ['campaignName'];
     saveLS('tb_visible_cols_v5', visibleCols); buildColPanel(); renderTable();
   }
-
   function renderCharts(){ renderTrend(); renderObjective(); }
 
   function scatterize(datasets, labels){
-    // Turns line-style datasets into a genuine scatter look (points only, no
-    // connecting line) while staying on the same category x-axis as Line/Bar —
-    // Chart.js's native 'scatter' type wants a linear/time x-axis + a date
-    // adapter we don't load, so this is the compatible way to get scatter points.
     return datasets.map(function(ds){
       return Object.assign({}, ds, { showLine:false, pointRadius:5, pointHoverRadius:7, fill:false });
     });
@@ -1174,20 +1353,16 @@
     var rbc=document.getElementById('reportBuilderCard'); if(rbc) rbc.style.display = (adset||ad) ? 'none' : '';
     document.getElementById('adsetWidgetsBar').style.display = adset ? 'flex' : 'none';
     if(!adset){ document.getElementById('placementWidgetCard').style.display='none'; document.getElementById('agegenderWidgetCard').style.display='none'; }
-    // Shared Campaign/Ad-Set sections vs. the Ads tab's own creative-grid view
     document.getElementById('kpiGrid').style.display = ad ? 'none' : '';
     document.getElementById('chartsGrid').style.display = ad ? 'none' : '';
     document.getElementById('campaignTableCard').style.display = ad ? 'none' : '';
     document.getElementById('adsView').style.display = ad ? 'block' : 'none';
-    // Archive upload isn't supported on the Ads tab yet (see ARCHIVE.ad note above) —
-    // hide the header control there rather than let someone upload a CSV that silently
-    // does nothing.
     var archiveWrap = document.querySelector('.archive-popover-wrap');
     if(archiveWrap) archiveWrap.style.display = ad ? 'none' : '';
     updateArchiveBarUI();
     if(adset){
       populateAdSetCampaigns();
-      loadAdSetData();               // shows a prompt if no campaign chosen yet
+      loadAdSetData();
     } else if(ad){
       var pop = document.getElementById('archivePopover'); if(pop) pop.classList.remove('open');
       populateAdsPickers();
@@ -1196,13 +1371,9 @@
       STATE = CAMP || { rows:[], campaigns:[], summary:emptySummaryClient() };
       renderBanners(); renderKPIs(); renderCharts(); renderTable();
     }
-    // Live Today is campaign-level only — show/hide (and refresh) it as the tab changes.
     loadLiveToday();
   }
-  // Ad Set tab's own date range — deliberately separate elements from the Campaigns
-  // tab's #filterDateFrom/#filterDateTo, per your ask: picking a range here no longer
-  // requires touching (or being affected by) the Campaigns tab's filter.
-  function adsetFilters(){ return { dateFrom:val('adsetDateFrom'), dateTo:val('adsetDateTo') }; }
+  function adsetFilters(){ return { dateFrom: val('adsetDateFrom'), dateTo: val('adsetDateTo') }; }
   function resetAdSetFilters(){
     document.getElementById('adsetDateFrom').value='';
     document.getElementById('adsetDateTo').value='';
@@ -1240,6 +1411,7 @@
       return;
     }
     showLoading();
+    showFilterStatus_('adsetFilterStatus');
     var filters = adsetFilters();
     if(isDemo()){ setTimeout(function(){ onAdSetData(DEMO_ADSET(adsetCampaign)); },200); return; }
     if(ARCHIVE.adset.mode){
@@ -1249,6 +1421,7 @@
     google.script.run.withSuccessHandler(onAdSetData).withFailureHandler(onFail).getAdSetData(adsetCampaign, filters);
   }
   function onAdSetData(res){
+    hideFilterStatus_('adsetFilterStatus');
     if(!res){ onFail(new Error('No response from server.')); return; }
     ADSET = res; if(!ADSET.summary) ADSET.summary = emptySummaryClient();
     STATE = ADSET;
@@ -1277,7 +1450,6 @@
     s.accountQuality = { score10: wt>0?Math.round(ws/wt*10)/10:null, dims:{q:null,e:null,c:null} };
     return { rows:rows, campaigns:camps, campaignList:[base], summary:s, error:null };
   }
-  // ── AD LEVEL TAB ──────────────────────────────────────────────────────────
   function adsFilters(){
     return {
       dateFrom: val('adsDateFrom'), dateTo: val('adsDateTo'),
@@ -1297,8 +1469,6 @@
     loadAdsData();
   }
   function onAdsCampaignChange(){
-    // changing the campaign narrows which ad sets make sense, so drop any previously
-    // chosen ad set before reloading (loadAdsData's response repopulates the list).
     document.getElementById('adsAdSet').value = '';
     loadAdsData();
   }
@@ -1307,14 +1477,12 @@
     adsLoadTimer_ = setTimeout(loadAdsData, 350);
   }
   function populateAdsPickers(){
-    // Cheap initial population (no filters) so the dropdowns aren't empty before the
-    // first loadAdsData() response comes back; loadAdsData()/onAdsData() keep them
-    // in sync (scoped to the current campaign) after that.
     if(isDemo()){ return; }
   }
   function loadAdsData(){
     var grid = document.getElementById('adsGrid');
     grid.innerHTML = '<div class="loading" style="grid-column:1/-1"><div class="spinner"></div><div style="font-size:13px;color:var(--text-secondary)">Loading ad creatives...</div></div>';
+    showFilterStatus_('adsFilterStatus');
     var filters = adsFilters();
     if(isDemo()){ setTimeout(function(){ onAdsData(DEMO_ADS()); },200); return; }
     if(ARCHIVE.ad.mode){ onAdsData({ ads:[], campaignList:[], adsetList:[], summary:emptySummaryClient(), error:'Archived Year view is not available on the Ads tab yet.' }); return; }
@@ -1323,16 +1491,24 @@
     }).getAdData(filters);
   }
   function onAdsData(res){
+    hideFilterStatus_('adsFilterStatus', res && res.error ? 'Error' : 'Updated');
     if(!res){ res = { ads:[], campaignList:[], adsetList:[], summary:emptySummaryClient(), error:'No response from server.' }; }
     ADS = res; if(!ADS.summary) ADS.summary = emptySummaryClient();
-    // keep the campaign/ad-set pickers in sync with what's actually in the sheet,
-    // without clobbering the user's current selection
     fillSelectPreserve_('adsCampaign', res.campaignList||[], 'All campaigns');
     fillSelectPreserve_('adsAdSet', res.adsetList||[], 'All ad sets');
     document.getElementById('lastUpdated').textContent = res.generatedAt || new Date().toLocaleString();
+    // Sep 2026 (Stage 1) — live count on the "Unknown / Pending" filter option so ads the
+    // creatives pipeline hasn't classified yet are visible as a number, not silently absent
+    // from "Video only" etc. creativeTypeCounts is computed server-side in getAdData()
+    // BEFORE the creativeType filter narrows the list, so this reflects the full current
+    // date/campaign/ad-set/search scope regardless of which type is currently selected.
+    var unkCount = (res.creativeTypeCounts && res.creativeTypeCounts.Unknown) || 0;
+    var unkOpt = document.getElementById('adsCreativeTypeUnknownOpt');
+    if(unkOpt) unkOpt.textContent = 'Unknown / Pending ('+unkCount+')';
     var banner_ = '';
     if(res.error) banner_ = banner('error','circle-exclamation','<b>Ads:</b> '+esc(res.error));
     else if(!res.ads || !res.ads.length) banner_ = banner('warn','triangle-exclamation','No ads match the current filters.');
+    else if(unkCount > 5) banner_ = banner('warn','circle-info','<b>'+unkCount+' ad(s)</b> haven’t been classified by the creative pipeline yet — Hook/Hold Rate and Scale Decision recommendations are disabled for those until <code>importAdCreatives()</code> catches up. Filter to <b>Unknown / Pending</b> above to see exactly which ones.');
     document.getElementById('bannerZone').innerHTML = activeLevel==='ad' ? banner_ : document.getElementById('bannerZone').innerHTML;
     document.getElementById('adsCount').textContent = (res.ads||[]).length;
     renderAdsKpis(res.summary, res.ads||[]);
@@ -1348,12 +1524,9 @@
     if(v==='Winner') return 'winner';
     if(v==='Needs optimization') return 'optimize';
     if(v==='Losing') return 'losing';
+    if(v==='Creative pending') return 'pending';
     return 'na';
   }
-  // Sep 2026, "add an indicator that shows the ads are active or not". a.status is Meta's
-  // raw effective_status string (see AD_CREATIVE_HEADERS_ in AdPipeline.gs) — one of
-  // ACTIVE/PAUSED/CAMPAIGN_PAUSED/ADSET_PAUSED/IN_PROCESS/WITH_ISSUES/PENDING_REVIEW/
-  // DISAPPROVED/'' (unknown, e.g. creative row not synced yet).
   function adStatusInfo_(status){
     var s = String(status||'').toUpperCase();
     if (s === 'ACTIVE') return { cls:'active', label:'Active' };
@@ -1364,10 +1537,10 @@
     if (s === 'IN_PROCESS' || s === 'PENDING_REVIEW') return { cls:'review', label:'In review' };
     return { cls:'paused', label:'Unknown status' };
   }
-  var AD_METRIC_LABELS_ = { cpm:'CPM', ctrLink:'CTR Link', ctrAll:'CTR All', frequency:'Frequency', hookRate:'Hook Rate', holdRate:'Hold Rate', roas:'ROAS', costPerMsg:'Cost / Conversation' };
+  var AD_METRIC_LABELS_ = { cpm:'CPM', ctrLink:'CTR Link', ctrAll:'CTR All', frequency:'Frequency', hookRate:'Hook Rate', holdRate:'Hold Rate', roas:'ROAS', costPerMsg:'Cost / Conversation', cpa:'Cost per Purchase' };
   function fmtMetric_(key, v){
     if(v==null) return '—';
-    if(key==='cpm' || key==='costPerMsg') return peso(v);
+    if(key==='cpm' || key==='costPerMsg' || key==='cpa') return peso(v);
     if(key==='roas') return num(v).toFixed(2)+'x';
     if(key==='frequency') return num(v).toFixed(2);
     return num(v).toFixed(1)+'%';
@@ -1400,12 +1573,6 @@
     var vcls = verdictClass_(sc.verdict);
     var statusInfo = adStatusInfo_(a.status);
     var isVideoCreative = a.creativeType === 'Video';
-    // Sep 2026, "some image creatives aren't loading": the URL picked server-side (customCover/
-    // nativeFrame/full-res image) is a signed, time-limited CDN link that can expire between
-    // daily importAdCreatives() refreshes — previously, if that ONE url 404'd, onerror gave up
-    // straight to the placeholder icon even when a.thumbnailFallbackUrl (the plain, more
-    // durable creative.thumbnail_url) would still have loaded fine. Now onerror retries that
-    // fallback once (via handleAdImgError, defined once below) before giving up for real.
     var bestUrl = a.thumbnailUrl || '';
     var fallbackUrl = (a.thumbnailFallbackUrl && a.thumbnailFallbackUrl !== bestUrl) ? a.thumbnailFallbackUrl : '';
     var thumb;
@@ -1417,24 +1584,9 @@
     } else {
       thumb = '<div class="ad-thumb-placeholder"><i class="fas fa-image"></i></div>';
     }
+    var isPendingSync = !!sc.pendingSync || sc.verdict==='Creative pending';
     var scoreTxt = sc.percent==null ? '—' : sc.percent+'%';
-    // Sep 2026, "the metrics listed below are the most important" — replaced the front-card
-    // row entirely per your list: Spend, Impressions, Frequency, CTR All, CTR Link, Cost per
-    // Purchase, Cost per Messaging Conversation, ROAS. CPC and CPM are REMOVED from here (not
-    // deleted — moved into the Diagnostic Metrics detail panel below, same "clicked ad view"
-    // you asked for). Every metric here gets colored by its benchmark band EXCEPT Spend, per
-    // your instruction — except where a band genuinely doesn't exist yet:
-    //   - Impressions has no color: a raw volume count has no inherent "good/bad" direction
-    //     the way a ratio metric (CTR/ROAS/Frequency) does, and nothing in the benchmark PDF
-    //     this whole system is built from grades it — same reasoning Spend was already
-    //     excluded for. Flagged to you rather than inventing a threshold; tell me the
-    //     direction/bounds you actually want if you meant this literally.
-    //   - Cost per Purchase (cpa) has no color YET: there's no Poor/Average/Good/Excellent
-    //     band for it anywhere in AD_BENCHMARK_BANDS_ (only ROAS is banded for Sales-objective
-    //     ads) — give me real PHP thresholds and this is a one-line addition.
-    //   - Cost per Messaging Conversation only has a band in the 'messaging' group, and ROAS
-    //     only in 'sales' — both already existed before this change. A Sales ad's Cost/Convo
-    //     tile (and a Messaging ad's ROAS tile) correctly shows "—", uncolored, same as before.
+    var verdictLabel = isPendingSync ? 'Pending sync' : sc.verdict;
     var bandByMetric_ = {};
     (sc.breakdown||[]).forEach(function(b){ bandByMetric_[b.metric] = b; });
     var FRONT_METRIC_FULLNAME_ = { cpa:'Cost per Purchase', costPerMsg:'Cost per Messaging Conversation' };
@@ -1448,15 +1600,6 @@
       return '<div class="'+cls+'"'+titleAttr+'><div class="v">'+v+'</div><div class="l">'+label+'</div></div>';
     }).join('');
     var detailId = 'adDetail'+i;
-    // Sep 2026, "color code each diagnostic/conversion metric red-yellow-green per benchmark":
-    // only metrics that have a REAL benchmark band get colored (ROAS from AD_BENCHMARK_BANDS_
-    // via bandByMetric_, Quality Ranking via Meta's own tier system, CPM below via cpmBand) —
-    // the rest (Reach, Post Engagements, CTR gap, CPC, Purchases, Purchase Value, Results,
-    // Cost per Result) have no genuine benchmark anywhere in this dashboard, so they stay
-    // neutral rather than faking a threshold. Same p0(red)/p1(yellow)/p2(green)/p3(dark green)
-    // palette as the front-of-card metrics and the band table below, for one consistent color
-    // language. (Frequency's own band-lookup moved up to the front-card metricRow above, since
-    // Frequency itself moved there — see that block's comment.)
     var roasBand = bandByMetric_['roas'];
     var qClass = a.qRankRaw==='Above average' ? 'p2' : a.qRankRaw==='Average' ? 'p1' : a.qRankRaw==='Below average' ? 'p0' : '';
     function infoRow_(label, value, cls, tip){
@@ -1464,13 +1607,6 @@
       var t = tip ? ' title="'+esc(tip)+'"' : '';
       return '<div class="ad-info-row'+c+'"'+t+'><span class="ad-info-label">'+label+'</span><span class="ad-info-value">'+value+'</span></div>';
     }
-    // Sep 2026: Frequency moved OUT of here — it's now on the front of the card (see
-    // metricRow above) and showing the identical number twice was pure clutter. CPC and CPM
-    // moved IN here instead — removed from the front row per your metrics list, relocated
-    // (not deleted) to this "clicked ad view", same as you asked. CPM keeps its existing
-    // benchmark color (banded in Sales/Messaging); CPC has never had a real benchmark
-    // anywhere in this dashboard, so — same rule as Reach/Post Engagements/CTR gap below —
-    // it stays neutral rather than faking a threshold.
     var cpmBand = bandByMetric_['cpm'];
     var diagRows = [
       infoRow_('Reach', compact(a.reach), '', ''),
@@ -1479,11 +1615,6 @@
       infoRow_('CTR All vs Link gap', num(a.ctrGap).toFixed(2)+' pts', '', ''),
       infoRow_('CPC', a.cpc==null?'—':peso(a.cpc), '', ''),
       infoRow_('CPM', peso(a.cpm), cpmBand?('p'+cpmBand.points):'', cpmBand?(cpmBand.label+' vs. benchmark'):'')
-      // Sep 2026, "metrics that only apply to videos shouldn't show in images": Video plays
-      // (3s) only means anything for a creative that actually has video plays — dropped
-      // entirely (not just shown as "—") for Image/Carousel/Unknown creatives. Note: no
-      // metric currently on this card is genuinely IMAGE-only, so there's nothing to hide
-      // from video cards in the other direction yet.
     ].concat(isVideoCreative ? [infoRow_('Video plays (3s)', compact(a.v3s), '', '')] : []).join('');
     var convRows = [
       infoRow_('Purchases', compact(a.purchases), '', ''),
@@ -1504,7 +1635,7 @@
       '<div class="ad-card '+vcls+'" onclick="toggleAdCard(\''+detailId+'\')">' +
         '<div class="ad-thumb-wrap">'+thumb+
           '<div class="ad-creative-type" title="'+esc(statusInfo.label)+'"><span class="ad-status-dot '+statusInfo.cls+'"></span>'+esc(a.creativeType||'Unknown')+'</div>'+
-          '<div class="ad-verdict '+vcls+'">'+esc(sc.verdict)+(sc.percent!=null?' &middot; '+scoreTxt:'')+'</div>'+
+          '<div class="ad-verdict '+vcls+'"'+(isPendingSync?' title="importAdCreatives() hasn\'t classified this ad yet — Hook/Hold Rate and the Scale Decision are disabled until it does."':'')+'>'+esc(verdictLabel)+(!isPendingSync&&sc.percent!=null?' &middot; '+scoreTxt:'')+'</div>'+
         '</div>' +
         '<div class="ad-card-body">' +
           '<div class="ad-name" title="'+esc(a.adName)+'">'+esc(a.adName)+'</div>' +
@@ -1516,7 +1647,7 @@
           '</div>' +
         '</div>' +
         '<div class="ad-detail-panel" id="'+detailId+'">' +
-          '<div class="ad-detail-section"><div class="ad-detail-title">Benchmark bands ('+esc(sc.group||'')+')</div>'+(bandChips||'<span class="muted">Not enough data yet.</span>')+'</div>' +
+          '<div class="ad-detail-section"><div class="ad-detail-title">Benchmark bands'+(sc.group?' ('+esc(sc.group)+')':'')+'</div>'+(isPendingSync?'<span class="muted">Creative type not classified yet — no benchmark scoring possible until importAdCreatives() syncs this ad.</span>':(bandChips||'<span class="muted">Not enough data yet.</span>'))+'</div>' +
           '<div class="ad-detail-cols">' +
             '<div class="ad-detail-section"><div class="ad-detail-title">Diagnostic metrics</div><div class="ad-info-grid">'+diagRows+'</div></div>' +
             '<div class="ad-detail-section"><div class="ad-detail-title">Conversion &amp; revenue</div><div class="ad-info-grid">'+convRows+'</div></div>' +
@@ -1528,10 +1659,6 @@
     var el = document.getElementById(id); if(!el) return;
     el.classList.toggle('open');
   }
-  // Sep 2026 — see the comment on `bestUrl`/`fallbackUrl` in adCardHTML_ for why this exists:
-  // one retry against the plainer, more durable thumbnail_url before giving up to the
-  // placeholder icon, instead of discarding a perfectly loadable (if lower-res) picture just
-  // because the higher-quality URL happened to be a dead/expired signed link right now.
   function handleAdImgError(img){
     var fb = img.getAttribute('data-fallback');
     if (fb) {
@@ -1547,63 +1674,193 @@
     if (wrap) wrap.innerHTML = '<div class="ad-thumb-placeholder"><i class="fas fa-image"></i></div>';
   }
   function DEMO_ADS(){
-    function mk(name, campaign, adset, creativeType, spend, impressions, ctrAll, ctrLink, purchases, purchaseValue, cpm, hook, hold){
+    function mk(name, campaign, adset, creativeType, spend, impressions, ctrAll, ctrLink, purchases, purchaseValue, cpm, hook, hold, opts){
+      opts = opts || {};
       var clicks = impressions*(ctrLink/100);
+      var aov = purchases>0 ? purchaseValue/purchases : null;
+      var cpa = purchases>0 ? spend/purchases : null;
       var a = {
         adId:'demo_'+name, adName:name, realCampaignName:campaign, adSetName:adset, creativeType:creativeType,
         thumbnailUrl:'', status:'ACTIVE', adsManagerLink:'',
         spent:spend, impressions:impressions, ctrAll:ctrAll, ctrLink:ctrLink, ctrGap:ctrAll-ctrLink,
-        cpc: clicks>0?spend/clicks:null, cpm:cpm, reach:Math.round(impressions/1.8), frequency:1.8,
+        cpc: clicks>0?spend/clicks:null, cpm:cpm, reach:Math.round(impressions/1.8), frequency: opts.frequency!=null?opts.frequency:1.8,
         postEngagements:Math.round(impressions*0.01), qRankRaw:'Average',
         v3s:Math.round(impressions*hook/100), v25:Math.round(impressions*hook/100*0.7), v50:Math.round(impressions*hook/100*0.5),
         v75:Math.round(impressions*hook/100*0.35), v100:Math.round(impressions*hold/100),
         purchases:purchases, purchaseValue:purchaseValue, roas: spend>0?purchaseValue/spend:0,
-        results:purchases, cpr: purchases>0?spend/purchases:null,
-        hookRate:hook, holdRate:hold, objective:'OUTCOME_SALES', optimizationGoal:'OFFSITE_CONVERSIONS', costPerMsg:null
+        results:purchases, cpr: cpa, aov:aov, cpa:cpa,
+        hookRate:hook, holdRate:hold,
+        objective: opts.objective || 'OUTCOME_SALES',
+        optimizationGoal: opts.optimizationGoal || 'OFFSITE_CONVERSIONS',
+        costPerMsg: opts.costPerMsg!=null ? opts.costPerMsg : null
       };
       a.scorecard = computeAdScorecardClient_(a);
       return a;
     }
+    // Eight ads, deliberately chosen to walk through every state the real dashboard can
+    // produce: all three objective groups (Sales/Messaging/Generic), the dynamic CPA band
+    // (derived from AOV, not a fixed number), a static-image ad, a video ad (Hook/Hold Rate
+    // apply), a carousel ad, an "Insufficient data" ad (under 1,000 impressions), and a
+    // "Creative pending" ad (creativeType not classified yet — the Stage 2 fast-path sync
+    // state described in AdPipeline.gs).
     var ads = [
-      mk('Save 20% — Static Offer A','Sales Prospecting','Broad 25-45','Image', 12400, 410000, 2.4, 2.1, 62, 96000, 30.2, 42, 38),
-      mk('Watch Our Story — Brand Video B','Sales Prospecting','Broad 25-45','Video', 9800, 260000, 1.3, 1.0, 14, 18400, 37.7, 22, 14),
-      mk('5 Best Sellers — Carousel C','Retargeting DPA','Retarget 30d','Carousel', 8100, 190000, 3.6, 3.2, 58, 71500, 42.6, 47, 41)
+      mk('Save 20% — Static Offer A','Sales Prospecting','Broad 25-45','Image', 9000, 410000, 7.5, 4.0, 60, 63000, 130, 0, 0,
+        {frequency:1.6}),
+      mk('Watch Our Story — Brand Video B','Sales Prospecting','Broad 25-45','Video', 9800, 260000, 5.5, 3.0, 8, 14700, 280, 38, 33,
+        {frequency:2.6}),
+      mk('5 Best Sellers — Carousel C','Retargeting DPA','Retarget 30d','Carousel', 8100, 190000, 1.5, 0.8, 3, 7000, 140, 0, 0,
+        {frequency:1.9}),
+      mk('Book a Free Consult — DM Video D','Messenger Leads','Warm Retarget','Video', 7000, 180000, 9.0, 4.5, 0, 0, 110, 42, 38,
+        {objective:'OUTCOME_ENGAGEMENT', optimizationGoal:'CONVERSATIONS', costPerMsg:40, frequency:1.7}),
+      mk('Ask Us Anything — Static E','Messenger Leads','Warm Retarget','Image', 6200, 95000, 6.0, 3.5, 0, 0, 180, 0, 0,
+        {objective:'OUTCOME_ENGAGEMENT', optimizationGoal:'CONVERSATIONS', costPerMsg:140, frequency:2.3}),
+      mk('New Product Teaser — Awareness F','New Launch (fresh)','Interest - Wellness','Video', 5400, 220000, 4.0, 2.5, 0, 0, 200, 30, 28,
+        {objective:'OUTCOME_AWARENESS', optimizationGoal:'IMPRESSIONS', frequency:2.2}),
+      mk('Just Launched — Testing G','Sales Prospecting','Lookalike 1%','Image', 210, 340, 3.0, 1.8, 0, 0, 210, 0, 0,
+        {frequency:1.1}),
+      mk('New Video Just Launched — Pending H','New Launch (fresh)','Broad 18-65','Unknown', 500, 15000, 0, 0, 0, 0, 0, 0, 0,
+        {frequency:1.0})
     ];
     var s = emptySummaryClient();
     ads.forEach(function(a){ s.totalSpent+=a.spent; s.totalPurchaseValue+=a.purchaseValue; });
     s.roas = s.totalSpent>0 ? s.totalPurchaseValue/s.totalSpent : 0;
     s.ctrLink = ads.reduce(function(sum,a){return sum+a.ctrLink;},0)/ads.length;
-    return { ads:ads, campaignList:['Sales Prospecting','Retargeting DPA'], adsetList:['Broad 25-45','Retarget 30d'], summary:s, generatedAt:new Date().toLocaleString(), error:null };
+    return {
+      ads:ads,
+      campaignList:['Sales Prospecting','Retargeting DPA','Messenger Leads','New Launch (fresh)'],
+      adsetList:['Broad 25-45','Retarget 30d','Warm Retarget','Interest - Wellness','Lookalike 1%','Broad 18-65'],
+      summary:s, generatedAt:new Date().toLocaleString(), error:null
+    };
   }
-  // Client-side mirror of Code.gs's computeAdScorecard_/classify* — demo-mode only, so the
-  // Ads tab's preview (outside Apps Script) shows realistic scoring instead of an empty grid.
+  // Client-side mirror of Code.gs's classifyObjectiveGroup_ / AD_BENCHMARK_BANDS_ /
+  // classifyBand_ / computeAdScorecard_ / computeScaleDecision_ — used ONLY when this page
+  // is running outside Apps Script (isDemo()===true, i.e. the GitHub Pages copy), since
+  // there's no google.script.run backend here to compute it for real. Kept in sync with the
+  // real backend logic (including all three objective groups and the CPA dynamic band) so
+  // the demo actually exercises the same scoring the live dashboard runs — the numbers below
+  // are the SAME illustrative [EXAMPLE_THRESHOLDS] placeholders as AD_BENCHMARK_BANDS_ in
+  // apps-script/Code.gs, not real benchmark data.
   var CLIENT_AD_BANDS_ = {
-    sales: { cpm:{dir:'lower',bounds:[300,180,120]}, ctrLink:{dir:'higher',bounds:[1.5,2.5,4.0]}, ctrAll:{dir:'higher',bounds:[3,5,7]},
-      hookRate:{dir:'higher',bounds:[25,35,45]}, holdRate:{dir:'higher',bounds:[20,30,40]}, roas:{dir:'higher',bounds:[2.0,3.5,5.0]} }
+    messaging: {
+      cpm:        {dir:'lower',  bounds:[300,200,120]},
+      ctrLink:    {dir:'higher', bounds:[1.5,2.5,4.0]},
+      ctrAll:     {dir:'higher', bounds:[3.0,5.0,8.0]},
+      frequency:  {dir:'lower',  bounds:[4.0,2.5,1.5]},
+      hookRate:   {dir:'higher', bounds:[20,30,40]},
+      holdRate:   {dir:'higher', bounds:[20,30,40]},
+      costPerMsg: {dir:'lower',  bounds:[150,90,50]}
+    },
+    sales: {
+      cpm:       {dir:'lower',  bounds:[350,220,150]},
+      ctrLink:   {dir:'higher', bounds:[1.2,2.0,3.5]},
+      ctrAll:    {dir:'higher', bounds:[2.5,4.0,6.5]},
+      frequency: {dir:'lower',  bounds:[4.5,3.0,2.0]},
+      hookRate:  {dir:'higher', bounds:[20,30,40]},
+      holdRate:  {dir:'higher', bounds:[20,30,40]},
+      roas:      {dir:'higher', bounds:[1.5,3.0,4.5]},
+      cpa:       {dir:'lower',  bounds:null, dynamicFrom:'roas'}
+    },
+    generic: {
+      hookRate: {dir:'higher', bounds:[15,25,35]},
+      holdRate: {dir:'higher', bounds:[15,25,35]},
+      ctrLink:  {dir:'higher', bounds:[1.0,2.0,3.0]}
+    }
   };
+  function classifyObjectiveGroupClient_(objective, optimizationGoal){
+    var og = String(optimizationGoal||'').toUpperCase();
+    var obj = String(objective||'').toUpperCase();
+    if (og === 'CONVERSATIONS') return 'messaging';
+    if (obj.indexOf('SALES') !== -1 || og === 'OFFSITE_CONVERSIONS' || og === 'ONSITE_CONVERSIONS' || og === 'VALUE') return 'sales';
+    return 'generic';
+  }
+  function classifyBandClient_(value, spec){
+    if (value===null || value===undefined || value==='' || isNaN(value)) return null;
+    var b = spec.bounds, pts;
+    if (spec.dir==='higher') pts = value<b[0]?0:value<b[1]?1:value<b[2]?2:3;
+    else pts = value>b[0]?0:value>b[1]?1:value>b[2]?2:3;
+    return { points:pts, label:['Poor','Average','Good','Excellent'][pts] };
+  }
+  function pointsForClient_(breakdown, key){
+    for (var i=0;i<breakdown.length;i++) if (breakdown[i].metric===key) return breakdown[i].points;
+    return null;
+  }
+  function computeScaleDecisionClient_(group, breakdown, isVideo){
+    var cpmPts = pointsForClient_(breakdown,'cpm');
+    var ctrPts = pointsForClient_(breakdown,'ctrAll')!==null ? pointsForClient_(breakdown,'ctrAll') : pointsForClient_(breakdown,'ctrLink');
+    var hookPts = pointsForClient_(breakdown,'hookRate');
+    var holdPts = pointsForClient_(breakdown,'holdRate');
+    var lowCpm = cpmPts!==null && cpmPts>=2;
+    var creativeMetricLabels = ['CTR'];
+    var creativeSignals = [ctrPts!==null && ctrPts>=2];
+    if (hookPts!==null) { creativeMetricLabels.push('Hook Rate'); creativeSignals.push(hookPts>=2); }
+    if (holdPts!==null) { creativeMetricLabels.push('Hold Rate'); creativeSignals.push(holdPts>=2); }
+    var creativeStrong = creativeSignals.every(function(s){return s;});
+    var creativeWeak = creativeSignals.every(function(s){return !s;});
+    var creativeLabel = creativeMetricLabels.length>1
+      ? creativeMetricLabels.slice(0,-1).join(', ')+', and '+creativeMetricLabels[creativeMetricLabels.length-1]
+      : creativeMetricLabels[0];
+    var creativeWeakWhy = isVideo
+      ? creativeLabel+' are all weak — the creative itself likely isn’t landing.'
+      : creativeLabel+' is weak — the creative itself likely isn’t landing (Hook/Hold Rate don’t apply to a static image/carousel ad).';
+    var creativeStrongParen = isVideo ? '(CTR/Hook/Hold)' : '(CTR — Hook/Hold Rate don’t apply to a static image/carousel ad)';
+    if (group==='sales'){
+      var roasPts = pointsForClient_(breakdown,'roas');
+      var highRoas = roasPts!==null && roasPts>=2;
+      if (lowCpm && creativeStrong && highRoas) return {action:'Scale aggressively', why:'Efficient CPM, strong creative signals '+creativeStrongParen+', and healthy ROAS.'};
+      if (!lowCpm && creativeStrong && !highRoas) return {action:'Improve landing page or offer', why:'The creative is clearly working ('+creativeLabel+' are good), but ROAS is lagging — the leak is likely after the click.'};
+      if (!lowCpm && creativeWeak) return {action:'New audience + new creative', why:'High CPM and weak engagement together usually means audience fatigue, not just a bad ad.'};
+      if (lowCpm && creativeStrong && roasPts===1) return {action:'Optimize checkout or pricing', why:'CPM and creative are both healthy, but ROAS is only average — check checkout friction or price/offer fit.'};
+      if (creativeWeak) return {action:'Replace creative', why:creativeWeakWhy};
+      return {action:'Keep testing', why:'Mixed signals — no single lever stands out yet. Compare against your other ads in this set before deciding.'};
+    }
+    if (group==='messaging'){
+      var cpaPts = pointsForClient_(breakdown,'costPerMsg');
+      var cheapConvo = cpaPts!==null && cpaPts>=2;
+      if (lowCpm && creativeStrong && cheapConvo) return {action:'Scale aggressively', why:'Efficient CPM, strong creative signals, and cheap cost per conversation.'};
+      if (creativeStrong && cpaPts!==null && !cheapConvo) return {action:'Speed up / simplify the messaging flow', why:'People are engaging with the creative, but conversations are expensive — the drop-off is likely in the chat/response flow, not the ad.'};
+      if (creativeWeak) return {action:'Replace creative', why:creativeWeakWhy};
+      if (!lowCpm && creativeStrong) return {action:'New audience + new creative', why:'High CPM despite decent engagement usually means the audience is saturated.'};
+      return {action:'Keep testing', why:'Mixed signals — compare against your other ads in this set before deciding.'};
+    }
+    if (lowCpm && creativeStrong) return {action:'Scale aggressively', why:'Efficient CPM and strong '+creativeLabel+' signals.'};
+    if (creativeWeak) return {action:'Replace creative', why:creativeWeakWhy};
+    return {action:'Keep testing', why:'This objective has no scale/replace matrix in your benchmark doc — judge this one against its sibling ads rather than an absolute rule.'};
+  }
   function computeAdScorecardClient_(a){
-    var bands = CLIENT_AD_BANDS_.sales;
+    if (!a.creativeType || a.creativeType==='Unknown'){
+      return { group:null, percent:null, verdict:'Creative pending', breakdown:[], decision:null, decisionWhy:null, pendingSync:true };
+    }
+    var group = classifyObjectiveGroupClient_(a.objective, a.optimizationGoal);
+    var bands = CLIENT_AD_BANDS_[group];
     var isVideo = a.creativeType === 'Video';
-    var vals = { cpm:a.cpm, ctrLink:a.ctrLink, ctrAll:a.ctrAll, hookRate:a.hookRate, holdRate:a.holdRate, roas:a.roas };
-    var breakdown=[], total=0, count=0;
-    Object.keys(bands).forEach(function(k){
-      if(!isVideo && (k==='hookRate' || k==='holdRate')) return; // static image/carousel — no video-play data to judge
-      var v = vals[k], spec = bands[k], b = spec.bounds, pts;
-      if(v==null || isNaN(v)) return;
-      if(spec.dir==='higher') pts = v<b[0]?0:v<b[1]?1:v<b[2]?2:3;
-      else pts = v>b[0]?0:v>b[1]?1:v>b[2]?2:3;
-      breakdown.push({metric:k, value:v, label:['Poor','Average','Good','Excellent'][pts], points:pts});
-      total+=pts; count++;
+    var metricValues = { cpm:a.cpm, ctrLink:a.ctrLink, ctrAll:a.ctrAll, frequency:a.frequency, hookRate:a.hookRate, holdRate:a.holdRate, roas:a.roas, costPerMsg:a.costPerMsg, cpa:a.cpa };
+    var breakdown=[], totalPts=0, counted=0;
+    Object.keys(bands).forEach(function(key){
+      if (!isVideo && (key==='hookRate' || key==='holdRate')) return;
+      var spec = bands[key];
+      if (spec.dynamicFrom){
+        if (a.aov==null || !(a.aov>0)) return;
+        var baseBounds = bands[spec.dynamicFrom].bounds;
+        spec = { dir:spec.dir, bounds: baseBounds.map(function(r){ return a.aov/r; }) };
+      }
+      var val = metricValues[key];
+      var res = classifyBandClient_(val, spec);
+      if (!res) return;
+      breakdown.push({metric:key, value:val, label:res.label, points:res.points});
+      totalPts += res.points; counted++;
     });
-    var percent = count>0 ? Math.round(total/(count*3)*100) : null;
-    var verdict = percent==null ? 'Insufficient data' : percent>=75 ? 'Winner' : percent>=45 ? 'Needs optimization' : 'Losing';
-    var strong = breakdown.filter(function(b){return b.points>=2;}).length >= 3;
-    var decision = verdict==='Winner' ? 'Scale aggressively' : (strong ? 'Improve landing page or offer' : 'Replace creative');
-    return { group:'sales', percent:percent, verdict:verdict, breakdown:breakdown, decision:decision, decisionWhy:'(Demo data — illustrative scoring only.)' };
+    var hasEnoughData = a.impressions >= 1000;
+    var percent = counted>0 ? Math.round(totalPts/(counted*3)*100) : null;
+    var verdict;
+    if (!hasEnoughData || percent===null) verdict = 'Insufficient data';
+    else if (percent>=75) verdict = 'Winner';
+    else if (percent>=45) verdict = 'Needs optimization';
+    else verdict = 'Losing';
+    var decision = computeScaleDecisionClient_(group, breakdown, isVideo);
+    return { group:group, percent:percent, verdict:verdict, breakdown:breakdown, decision:decision.action, decisionWhy:decision.why, pendingSync:false };
   }
   function lockedTab(name){ showToast(name+' view is coming soon - Campaigns is the focus for now.'); }
   function switchChartType(type){ trendType=type; document.querySelectorAll('#trendFormatTabs button').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-chart')===type); }); renderTrend(); }
-
   function renderBanners(){
     var html = '';
     if(STATE.isArchive) html += banner('warn','file-csv','<b>Archived CSV view</b> — showing an uploaded file, not the live workbook. Use "Back to live data" above the filters to return.');
@@ -1618,8 +1875,31 @@
 
   function isDemo(){ return (typeof google==='undefined' || !google.script || !google.script.run); }
   function showLoading(){ document.getElementById('campaignTableBody').innerHTML = '<tr><td colspan="'+shownCols().length+'"><div class="loading"><div class="spinner"></div><div style="font-size:13px;color:var(--text-secondary)">Loading campaign data...</div></div></td></tr>'; }
+
+  // Sep 2026 — "users don't know if their filter changes are being read." Every filter
+  // bar (Campaigns/Ad Set/Ads) now flashes one of these right next to its own Apply/Reset
+  // buttons, scoped by element id so a change on one tab can never light up another tab's
+  // status pill even if two loads happen to overlap. doneTimer per-id (not a single shared
+  // timer) so a fast tab switch can't cancel another bar's fade-out early.
+  var filterStatusDoneTimers_ = {};
+  function showFilterStatus_(id, label){
+    var el = document.getElementById(id); if(!el) return;
+    clearTimeout(filterStatusDoneTimers_[id]);
+    el.classList.remove('done');
+    el.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> '+esc(label||'Searching…');
+    el.classList.add('show');
+  }
+  function hideFilterStatus_(id, doneLabel){
+    var el = document.getElementById(id); if(!el) return;
+    el.classList.add('done');
+    el.innerHTML = '<i class="fas fa-check"></i> '+esc(doneLabel||'Updated');
+    clearTimeout(filterStatusDoneTimers_[id]);
+    filterStatusDoneTimers_[id] = setTimeout(function(){ el.classList.remove('show'); },1400);
+  }
+
   function loadData(filters){
     showLoading();
+    showFilterStatus_('campFilterStatus');
     if(isDemo()){ setTimeout(function(){ onData(DEMO_DATA()); },200); return; }
     if(ARCHIVE.campaign.mode){
       google.script.run.withSuccessHandler(onData).withFailureHandler(onFail).getDashboardDataFromCsv(ARCHIVE.campaign.csv, filters||{});
@@ -1628,7 +1908,6 @@
     google.script.run.withSuccessHandler(onData).withFailureHandler(onFail).getDashboardData(filters||{});
   }
 
-  // ── Archived Year (CSV) upload handling ──
   function onArchiveFileChosen(input){
     var file = input.files && input.files[0];
     if(!file) return;
@@ -1636,14 +1915,8 @@
     reader.onload = function(e){
       ARCHIVE[activeLevel] = { mode:true, csv:e.target.result, fileName:file.name };
       updateArchiveBarUI();
-      // FIXED (Aug 2026): this used to require picking a campaign from the LIVE dropdown
-      // BEFORE uploading the archive CSV, because the campaign picker only ever read from
-      // the live workbook — it never knew what campaigns the CSV actually contained. Now
-      // that the picker re-reads from the uploaded CSV itself (getAdSetCampaignsFromCsv),
-      // clear the old selection and let it repopulate from what's really in this file —
-      // this also fixes picking a campaign that only exists in the archived year.
       if(activeLevel==='adset'){ adsetCampaign=''; populateAdSetCampaigns(); loadAdSetData(); } else { loadData(readFilters()); }
-      loadLiveToday(); // archive mode just changed — Live Today only makes sense outside it
+      loadLiveToday();
     };
     reader.onerror = function(){ showToast('Could not read that file — try re-exporting it with exportYearToCsv().'); };
     reader.readAsText(file);
@@ -1662,14 +1935,11 @@
       ? '<i class="fas fa-file-csv" style="color:var(--brand)"></i> Viewing archived file: <b>'+esc(a.fileName)+'</b> — not live workbook data.'
       : '';
     var fi = document.getElementById('archiveFileInput'); if(fi) fi.value = '';
-    // Header button reflects archive state even while the popover is closed, so you
-    // always know at a glance whether you're looking at live or archived data.
     var toggleBtn = document.getElementById('archiveToggleBtn');
     var toggleLabel = document.getElementById('archiveToggleLabel');
     if(toggleBtn) toggleBtn.classList.toggle('active', !!a.mode);
     if(toggleLabel) toggleLabel.textContent = a.mode ? 'Archived: ' + a.fileName : 'Archived Data';
   }
-  // ── Header popover open/close (click the button to toggle, click outside or Esc to close) ──
   function toggleArchivePopover(e){
     if(e) e.stopPropagation();
     document.getElementById('archivePopover').classList.toggle('open');
@@ -1686,7 +1956,25 @@
     }
   });
 
+  function toggleSOP(e){
+    if(e) e.stopPropagation();
+    document.getElementById('sopOverlay').classList.toggle('open');
+  }
+  document.addEventListener('keydown', function(e){
+    if(e.key === 'Escape'){
+      var sop = document.getElementById('sopOverlay');
+      if(sop) sop.classList.remove('open');
+    }
+  });
+  (function(){
+    var sopOverlay = document.getElementById('sopOverlay');
+    if(sopOverlay) sopOverlay.addEventListener('click', function(e){
+      if(e.target === this) this.classList.remove('open');
+    });
+  })();
+
   function onData(res){
+    hideFilterStatus_('campFilterStatus');
     if(!res){ onFail(new Error('No response from server.')); return; }
     CAMP = res; CAMP.demo = isDemo();
     if(!CAMP.summary) CAMP.summary = emptySummaryClient();
@@ -1707,6 +1995,11 @@
   }
   function refreshActive(){ if(activeLevel==='adset'){ loadAdSetData(); } else { loadData(readFilters()); } }
   function onFail(err){
+    // Shared failure handler for both the Campaigns and Ad Set loads (they render into the
+    // same table/cards) — hide whichever of those two tabs' status pill matches the level
+    // that's actually active right now, so a Campaigns-tab error can never flash "Updated"
+    // on the Ad Set tab's pill (or vice versa) while it's off-screen.
+    hideFilterStatus_(activeLevel==='adset' ? 'adsetFilterStatus' : 'campFilterStatus', 'Error');
     STATE = { rows:[], campaigns:[], summary:emptySummaryClient(), missing:[], error:(err&&err.message)?err.message:String(err), demo:false };
     renderBanners(); renderKPIs(); renderTable();
     if(trendChart) trendChart.destroy(); if(objectiveChart) objectiveChart.destroy();
@@ -1719,14 +2012,8 @@
   function updateClock(){ var el=document.getElementById('timeDisplay'); if(el) el.textContent = new Date().toLocaleString('en-PH',{weekday:'short',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
 
   function qs(qq,ee,cc){ var d={q:qq,e:ee,c:cc}, has=(qq!==null||ee!==null||cc!==null); if(!has)return{hasData:false,score10:null,dims:d}; var p=[qq,ee,cc].map(function(x){return x===null?2:x;}); var a=(p[0]+p[1]+p[2])/3; return{hasData:true,score10:Math.round(a*3.33*10)/10,dims:d}; }
-  // ── Pipeline freshness + "Today (Live)" snapshot (Sep 2026) ──────────────────────
-  // Two deliberately separate trust levels, per your explicit ask ("make sure users
-  // will be able to distinguish the accurate data from the inaccurate one"):
-  //   - renderFreshnessStrip: calm, "when did the real self-healed sheets last succeed"
-  //   - renderLiveToday: loud, "Meta's raw right-now numbers, not yet settled"
-  // Never merge these two into one number or one color — that's the whole point.
-  var FRESHNESS_LABELS_ = { campaigns:'Campaigns', adsets:'Ad Sets', ads:'Ads', creatives:'Creatives' };
-  var FRESHNESS_STALE_MS_ = 24*60*60*1000; // warn if a pipeline hasn't genuinely succeeded in 24h
+  var FRESHNESS_LABELS_ = { campaigns:'Campaigns', adsets:'Ad Sets', ads:'Ads', creatives:'Creatives', adset_placement:'Ad Set Placement', adset_agegender:'Ad Set Age/Gender' };
+  var FRESHNESS_STALE_MS_ = 24*60*60*1000;
 
   function relTime_(iso){
     if(!iso) return null;
@@ -1741,6 +2028,13 @@
     return Math.round(hrs/24)+'d ago';
   }
 
+  // Sep 2026 — added adset_placement + adset_agegender to the strip (previously these two
+  // pipelines had zero freshness signal at all — see AdSetPipeline.gs/Code.gs for the
+  // backing markPipelineRefreshed_ + getPipelineFreshness changes). The "catching up" check
+  // takes priority over the plain stale/ok/bad read: adset_agegender pagination can now span
+  // multiple daily trigger runs (see getAdSetAgeGenderCatchupState_), so a run finishing
+  // without writing the real sheet yet is neither an error nor confirmed-fresh — it's its
+  // own honest, distinct "still working on it" chip.
   function renderFreshnessStrip(data){
     var el = document.getElementById('freshnessStrip');
     if(!el) return;
@@ -1751,9 +2045,12 @@
       var ageMs = e.lastSuccess ? (Date.now() - new Date(e.lastSuccess.indexOf('T')!==-1 ? e.lastSuccess : e.lastSuccess.replace(' ','T')).getTime()) : Infinity;
       var stale = !e.lastSuccess || ageMs > FRESHNESS_STALE_MS_;
       var failing = (e.failStreak||0) >= 3;
-      var cls = failing ? 'bad' : (stale ? 'warn' : 'ok');
+      var catchingUp = !!e.catchingUp;
+      var cls = catchingUp ? 'catching-up' : (failing ? 'bad' : (stale ? 'warn' : 'ok'));
       var text = e.lastSuccess ? ('<b>'+FRESHNESS_LABELS_[key]+'</b> as of '+rel) : ('<b>'+FRESHNESS_LABELS_[key]+'</b> never confirmed');
-      var title = failing ? 'This pipeline has failed '+e.failStreak+' time(s) in a row — data may be behind.'
+      if(catchingUp) text = '<b>'+FRESHNESS_LABELS_[key]+'</b> still catching up';
+      var title = catchingUp ? ('Pagination is spanning multiple runs — the sheet is behind'+(e.windowSince ? ' the pinned window ('+esc(e.windowSince)+' to '+esc(e.windowUntil||'?')+')' : ' its latest snapshot')+' but actively working, not stuck or failing.')
+                : failing ? 'This pipeline has failed '+e.failStreak+' time(s) in a row — data may be behind.'
                 : (stale ? 'Hasn’t refreshed in over a day — worth checking the trigger.' : 'Refreshing normally.');
       return '<span class="freshness-chip '+cls+'" title="'+title+'"><i class="fas fa-circle fc-dot"></i>'+text+'</span>';
     }).join('');
@@ -1766,7 +2063,9 @@
       campaigns:{ lastSuccess:ago(38), failStreak:0 },
       adsets:{ lastSuccess:ago(52), failStreak:0 },
       ads:{ lastSuccess:ago(410), failStreak:1 },
-      creatives:{ lastSuccess:ago(70), failStreak:0 }
+      creatives:{ lastSuccess:ago(70), failStreak:0 },
+      adset_placement:{ lastSuccess:ago(60), failStreak:0 },
+      adset_agegender:{ lastSuccess:ago(25), failStreak:0, catchingUp:true, windowSince:'2026-09-16', windowUntil:'2026-09-22' }
     };
   }
 
@@ -1774,7 +2073,6 @@
     if(isDemo()){ renderFreshnessStrip(DEMO_FRESHNESS()); return; }
     google.script.run.withSuccessHandler(renderFreshnessStrip).withFailureHandler(function(){ renderFreshnessStrip(null); }).getPipelineFreshness();
   }
-
   function renderLiveToday(res){
     var body = document.getElementById('liveTodayBody');
     var adsBody = document.getElementById('liveTodayAdsBody');
@@ -1790,7 +2088,6 @@
     }
     asOf.textContent = 'as of '+res.asOf;
 
-    // ── Campaigns ──
     if(!res.campaigns || !res.campaigns.length){
       body.innerHTML = '<div class="live-today-empty">No active campaign spend yet today.</div>';
     } else {
@@ -1800,9 +2097,6 @@
       body.innerHTML = '<table class="live-today-table"><thead><tr><th>Campaign</th><th>Spend</th><th>Impressions</th><th>CTR (Link)</th><th>Purchases</th></tr></thead><tbody>'+rows+'</tbody></table>';
     }
 
-    // ── Top ads (numbers only — see fetchTodayLiveAdsFromMeta_ in Code.gs for why no
-    // live thumbnail fetch happens here; a thumbnail only shows if the self-healing
-    // pipeline already resolved one) ──
     if(res.adsOk===false){
       adsBody.innerHTML = '<div class="live-today-empty"><i class="fas fa-circle-exclamation"></i> '+esc(res.adsError||'Could not load live ad data right now.')+'</div>';
     } else if(!res.ads || !res.ads.length){
@@ -1815,8 +2109,6 @@
       adsBody.innerHTML = '<table class="live-today-table"><thead><tr><th></th><th>Ad</th><th>Spend</th><th>Impressions</th><th>CTR (Link)</th><th>Purchases</th></tr></thead><tbody>'+adRows+'</tbody></table>';
     }
 
-    // Collapsed-state peek: totals + the current top ad, so the card stays useful even
-    // folded away — click the header (or the chevron) to expand into the full tables.
     var totalSpend = 0, totalPurchases = 0;
     (res.campaigns||[]).forEach(function(c){ totalSpend += num(c.spend); totalPurchases += num(c.purchases); });
     var topAd = (res.ads && res.ads.length) ? res.ads[0] : null;
@@ -1844,9 +2136,6 @@
     };
   }
 
-  // Collapsed by default (per your ask — it was eating too much space above the fold);
-  // remembers the user's last choice in this browser via localStorage, same pattern as
-  // the widget-visibility toggles (loadLS/saveLS) above.
   function isLiveTodayExpanded_(){ try{ return localStorage.getItem('tb_live_today_expanded_v1')==='1'; }catch(e){ return false; } }
   function toggleLiveToday(){
     var card = document.getElementById('liveTodayCard');
@@ -1858,8 +2147,6 @@
   function loadLiveToday(){
     var card = document.getElementById('liveTodayCard');
     if(!card) return;
-    // Campaign-level scope only, per your ask — and hidden in archive mode, since an
-    // archived year's CSV has nothing to do with what's happening on Meta right now.
     var shouldShow = activeLevel==='campaign' && !(ARCHIVE.campaign && ARCHIVE.campaign.mode);
     card.style.display = shouldShow ? 'block' : 'none';
     card.classList.toggle('expanded', isLiveTodayExpanded_());
@@ -1871,8 +2158,6 @@
   var LIVE_TODAY_POLL_ = null;
   function startLiveTodayPolling(){
     if(LIVE_TODAY_POLL_) clearInterval(LIVE_TODAY_POLL_);
-    // Matches the server's own 5-minute cache TTL (getTodayLiveSnapshot in Code.gs) —
-    // polling faster would just re-serve the same cached snapshot.
     LIVE_TODAY_POLL_ = setInterval(function(){ loadFreshness(); loadLiveToday(); }, 5*60*1000);
   }
 
@@ -1898,8 +2183,6 @@
     s.accountQuality = { score10:wt>0?Math.round(ws/wt*10)/10:null, dims:{q:d('q'),e:d('e'),c:d('c')} };
     return { rows:rows, campaigns:C, summary:s, missing:[], sheetName:'DEMO', generatedAt:new Date().toLocaleString(), allCampaignNames:C.map(function(c){return c.campaignName;}), error:null };
   }
-
-  // ── AD SET BREAKDOWN WIDGETS (Placement / Age & Gender) ──
   var WIDGET_DEFS = [
     { id:'placement',  label:'Performance by Placement' },
     { id:'agegender',   label:'Performance by Age & Gender' }
@@ -1975,7 +2258,7 @@
       type:'bar', data:{ labels:ages, datasets:datasets },
       options:{ responsive:true, maintainAspectRatio:false,
         plugins:{ legend:{labels:{usePointStyle:true}}, tooltip:{callbacks:{label:function(c){ return c.dataset.label+': '+c.parsed.y+'x ROAS'; }}} },
-        scales:{ x:{grid:{display:false}}, y:{ticks:{callback:function(v){return v+'x';}}} } } // grouped, NOT stacked — see chart-note above
+        scales:{ x:{grid:{display:false}}, y:{ticks:{callback:function(v){return v+'x';}}} } }
     });
   }
   function DEMO_ADSET_PLACEMENT(){
@@ -1995,7 +2278,6 @@
     ]};
   }
 
-  // ── REPORT BUILDER: flexible Metric + Breakdown (Age/Gender/Platform/Placement/Region) ──
   var REPORT_BREAKDOWN_DEFS = [
     { key:'age',       label:'Age',       icon:'fa-cake-candles' },
     { key:'gender',    label:'Gender',    icon:'fa-venus-mars' },
@@ -2141,7 +2423,7 @@
   function renderReportChart(rows, metrics){
     document.getElementById('reportChartWrap').style.display='block';
     var note = document.getElementById('reportFormatNote');
-    var top = rows.slice(0,15); // keep the chart readable when a breakdown has many values
+    var top = rows.slice(0,15);
     var labels = top.map(function(r){ return r.label; });
     var palette = ['#0866FF','#F2545B','#31A24C','#8B5CF6','#F0A020','#00B7C3','#EC4899'];
     if(reportChartInstance) reportChartInstance.destroy();
@@ -2217,7 +2499,7 @@
     if(cfg.region){
       var rf = cfg.region.toLowerCase();
       combos = combos.filter(function(c){
-        if(dims.indexOf('region')===-1) return true; // region used as filter-only in real API; demo just keeps all combos
+        if(dims.indexOf('region')===-1) return true;
         return String(c.region||'').toLowerCase().indexOf(rf)!==-1;
       });
     }
@@ -2247,21 +2529,12 @@
     }).sort(function(a,b){ return b.spend-a.spend; });
     return { rows:rows, dims:dims, error:null };
   }
-
-  // ── LANDING SCREEN: Live vs Archived Year (Aug 2026) ──
-  // Gates the FIRST load only. buildCardPanel()/buildColPanel()/etc. below still run
-  // immediately on DOMContentLoaded since they're pure local UI setup, independent of
-  // which data source gets chosen; the actual server calls (refreshReportCampaigns(),
-  // loadData({})) are deferred into initDashboardAfterChoice_(), fired only once the
-  // user picks Live or finishes uploading an Archived year.
-  var ARCHIVE_BREAKDOWNS = { campaign: {}, adset: {} }; // populated by loadArchivedYear()
+  var ARCHIVE_BREAKDOWNS = { campaign: {}, adset: {} };
   var LANDING_ARCHIVE_FILES = { campaign: {}, adset: {}, year: null };
   var CAMPAIGN_FILE_ROLES_ = { data_by_day:'main', data_age:'age', data_gender:'gender', data_platform:'platform', data_placement:'placement', data_region:'region' };
   var ADSET_FILE_ROLES_ = { data_adset_by_day:'main', adset_status:'status', data_adset_placement:'placement', data_adset_agegender:'agegender' };
 
   function classifyLandingFileName_(name){
-    // Matches exactly what exportYearToCsv() (ArchiveTools.gs) names its files:
-    // "<Campaign|AdSet>_<sheet-key>_<year>.csv"
     var m = /^(campaign|adset)_(.+)_(\d{4})\.csv$/i.exec(String(name||'').trim());
     if(!m) return null;
     var level = m[1].toLowerCase(), key = m[2].toLowerCase(), year = m[3];
@@ -2332,7 +2605,6 @@
     else showToast('Archived '+(year||'')+' data loaded.');
   }
 
-  // Runs exactly once, after the landing screen choice is made either way.
   function initDashboardAfterChoice_(){
     refreshReportCampaigns();
     loadData({});
@@ -2346,16 +2618,13 @@
     ['reportDateFrom','reportDateTo'].forEach(function(id){ var el=document.getElementById(id); if(el) el.addEventListener('change', refreshReportCampaigns); });
     ['filterDateFrom','filterDateTo'].forEach(function(id){ document.getElementById(id).addEventListener('change', function(){ activePill=null; updatePillUI(); }); });
     ['adsetDateFrom','adsetDateTo'].forEach(function(id){ var el=document.getElementById(id); if(el) el.addEventListener('change', function(){
-      // "Active only" is scoped to this date range, so a changed range can change which
-      // campaigns qualify — refresh the picker, then reload whatever's currently selected.
       if(document.getElementById('adsetActiveOnly').checked) populateAdSetCampaigns();
       loadAdSetData();
     }); });
     ['adsDateFrom','adsDateTo'].forEach(function(id){ var el=document.getElementById(id); if(el) el.addEventListener('change', loadAdsData); });
     updateClock(); setInterval(updateClock, 30000);
-    // NOTE: no loadData({}) / refreshReportCampaigns() call here anymore — the landing
-    // screen (#landingOverlay) gates the first load; see chooseLiveData() / loadArchivedYear().
   });
 </script>
+
 </body>
 </html>

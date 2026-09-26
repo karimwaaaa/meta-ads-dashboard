@@ -762,6 +762,12 @@ var ADSET_AGEGENDER_FAIL_STREAK_PROP_ = 'ADSET_AGEGENDER_IMPORT_FAIL_STREAK';
 // 6-minute budget instead of splitting one budget two ways — wired up but not switched to
 // automatically, since that means changing which functions your Apps Script triggers point
 // at, which is your call to make, not something to silently change out from under you.
+//
+// NOTE (Sep 2026): your triggers already point at the two split functions below, not at
+// this combined one — this function is kept only because backfillAdSetBreakdownHistory()
+// style callers still use importAdSetPlacementRange_()/importAdSetAgeGenderRange_()
+// directly (see those, further down) and nothing else in this project calls this
+// function anymore. Safe to leave as-is.
 function importAdSetBreakdownData() {
  try {
   var until = getYesterday();
@@ -817,6 +823,11 @@ function importAdSetPlacementDaily() {
     if (pStreak >= LOOKBACK_DAYS) alertAdSetBreakdownImportFailing_('Placement', 'placement', pStreak, pResult.errorMessage);
   } else {
     resetFailStreak_(ADSET_PLACEMENT_FAIL_STREAK_PROP_);
+    // Sep 2026 — freshness strip gap: this pipeline never stamped markPipelineRefreshed_ at
+    // all, so data_adset_placement had NO freshness signal on the dashboard whatsoever (not
+    // stale, not fresh — just absent). Only stamp on a genuine successful fetch, same rule
+    // every other pipeline follows.
+    markPipelineRefreshed_('adset_placement');
   }
  } catch (e) {
   Logger.log('⚠️ importAdSetPlacementDaily: UNCAUGHT exception — ' + (e && e.message ? e.message : String(e)));
@@ -830,23 +841,257 @@ function importAdSetPlacementDaily() {
  }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ── RESUMABLE PAGINATION STATE for Age×Gender (Sep 2026) ──
+// Confirmed via real Executions log data (Sept 17-23) that importAdSetAgeGenderDaily's
+// successful-run durations climbed 156s -> 181s -> 267s -> 346s over six days, with
+// outright timeouts scattered in between (17th, 20th, 22nd all hit the 360s ceiling) —
+// the same growing-workload-against-a-fixed-ceiling pattern already fixed for
+// importAdCreatives() in AdPipeline.gs. Same underlying platform fact applies here too:
+// "Exceeded maximum execution time" is a hard kill, not a catchable JS exception, so
+// state has to be saved SYNCHRONOUSLY as pagination progresses — there is no reliable
+// "after" to clean up in once a real timeout lands.
+//
+// Deliberately NOT applied to importAdSetPlacementDaily() above, or to the shared
+// importAdSetAgeGenderRange_() / fetchAdSetBreakdownRows_() helpers further down:
+//   - importAdSetPlacementDaily has shown no timeout and no growth trend across the same
+//     7 days (90-193s on 6 of 7 runs) — adding resumability here would be unneeded
+//     complexity solving a problem that does not exist yet. Leave it alone unless its own
+//     Executions log ever shows the same climbing pattern.
+//   - importAdSetAgeGenderRange_()/fetchAdSetBreakdownRows_() are also called by every
+//     backfill path (backfillAdSetBreakdownHistory, backfillAdSetBreakdownsCustomRange,
+//     backfillAdSetOneBreakdownCustomRange, importAdSetBreakdownData), which all assume a
+//     single call fetches AND writes one range synchronously before moving on to the
+//     next chunk. Making that shared helper resumable would break that assumption (a
+//     backfill loop would advance to the next month before a resumed chunk actually
+//     finished writing). So those stay exactly as they were, and importAdSetAgeGenderDaily()
+//     below talks to the Graph API and its own staging sheet directly instead of calling
+//     through importAdSetAgeGenderRange_() — surgical to just this one trigger function.
+//
+// Rows are staged as their FINAL built shape (11-column arrays matching
+// ADSET_AGEGENDER_HEADERS_), not raw JSON like AdCreatives' staging — this data needs no
+// further enrichment after pagination, so the already-computed row IS the staging format,
+// which also means the staging sheet can be written/read with plain setValues/getValues,
+// no JSON parse overhead.
+//
+// The date window (since/until) actually in use when pagination STARTED is pinned to
+// Properties too, not recomputed from getYesterday()/getDateNDaysAgo_ on every run — if
+// pagination takes more than one daily run to finish, "today" has moved on by the time a
+// later run resumes it, and recomputing the rolling window fresh would silently write the
+// staged rows against the WRONG date range instead of the one they were actually fetched
+// for. Pin once at the start, reuse verbatim on every resumed run and the final write.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var ADSET_AGEGENDER_STAGING_SHEET_ = 'adset_agegender_staging';
+var ADSET_AGEGENDER_RESUME_CURSOR_PROP_ = 'ADSET_AGEGENDER_RESUME_CURSOR';
+var ADSET_AGEGENDER_PAGINATION_DONE_PROP_ = 'ADSET_AGEGENDER_PAGINATION_DONE';
+var ADSET_AGEGENDER_WINDOW_SINCE_PROP_ = 'ADSET_AGEGENDER_WINDOW_SINCE';
+var ADSET_AGEGENDER_WINDOW_UNTIL_PROP_ = 'ADSET_AGEGENDER_WINDOW_UNTIL';
+var ADSET_AGEGENDER_TIME_BUDGET_MS_ = 270000; // 4.5 min soft budget — same margin as importAdCreatives()
+
+function clearAdSetAgeGenderStaging_() {
+  var sheet = getOrCreateAdSetPlainSheet_(ADSET_AGEGENDER_STAGING_SHEET_);
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 0) sheet.getRange(1, 1, lastRow, Math.max(1, sheet.getLastColumn())).clearContent();
+}
+
+function appendAdSetAgeGenderStagingRows_(rows) {
+  if (!rows || !rows.length) return;
+  var sheet = getOrCreateAdSetPlainSheet_(ADSET_AGEGENDER_STAGING_SHEET_);
+  var start = sheet.getLastRow() + 1;
+  var need = start + rows.length - 1;
+  if (need > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), need - sheet.getMaxRows());
+  sheet.getRange(start, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+function readAdSetAgeGenderStaging_() {
+  var sheet = getOrCreateAdSetPlainSheet_(ADSET_AGEGENDER_STAGING_SHEET_);
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 1) return [];
+  var lastCol = sheet.getLastColumn();
+  return sheet.getRange(1, 1, lastRow, lastCol).getValues();
+}
+
+// Sep 2026 — "the dashboard should show data that isn't final yet as still-catching-up,
+// not just fresh/stale." A resume cursor being present means pagination stopped partway
+// through a run (hit its time budget) and hasn't reached the real write yet — the LIVE
+// data_adset_agegender sheet is therefore behind the pinned window by definition, even
+// though nothing has technically "failed." Read directly by getPipelineFreshness() in
+// Code.gs so the freshness chip can render a distinct "catching up" state instead of
+// lumping this in with "stale" (which would wrongly suggest the trigger stopped running)
+// or "ok" (which would wrongly suggest the sheet is already current).
+function getAdSetAgeGenderCatchupState_() {
+  var props = PropertiesService.getScriptProperties();
+  return {
+    inProgress: !!props.getProperty(ADSET_AGEGENDER_RESUME_CURSOR_PROP_),
+    windowSince: props.getProperty(ADSET_AGEGENDER_WINDOW_SINCE_PROP_) || null,
+    windowUntil: props.getProperty(ADSET_AGEGENDER_WINDOW_UNTIL_PROP_) || null
+  };
+}
+
+// REWRITTEN (Sep 2026) — see the RESUMABLE PAGINATION STATE comment above for the full
+// reasoning. Fetches age/gender breakdown pages directly (bypassing
+// importAdSetAgeGenderRange_()/fetchAdSetBreakdownRows_(), which stay unchanged for
+// backfill callers), staging each page to its own sheet and checkpointing a resume
+// cursor + the pinned date window after every page. A run that exceeds the soft time
+// budget stops cleanly and saves its place instead of risking the platform's hard kill;
+// the next scheduled run picks up exactly where it left off. Only once pagination has
+// genuinely finished (no more paging.next) does this read the full staged set back and
+// do the one real write to data_adset_agegender — the same clear+append your dashboard
+// already relies on, just no longer required to happen inside a single execution.
 function importAdSetAgeGenderDaily() {
  try {
-  var until = getYesterday();
-  var since = getDateNDaysAgo_(LOOKBACK_DAYS);
-  var aResult = importAdSetAgeGenderRange_(since, until);
-  if (!aResult.ok) {
-    var aStreak = bumpFailStreak_(ADSET_AGEGENDER_FAIL_STREAK_PROP_);
-    Logger.log('importAdSetAgeGenderDaily: fetch failed (' + aResult.errorMessage + ') — fail streak ' + aStreak + ' day(s).');
-    if (aStreak >= LOOKBACK_DAYS) alertAdSetBreakdownImportFailing_('Age & Gender', 'agegender', aStreak, aResult.errorMessage);
+  var __t0 = Date.now();
+  var props = PropertiesService.getScriptProperties();
+  var paginationDone = props.getProperty(ADSET_AGEGENDER_PAGINATION_DONE_PROP_) === 'true';
+  var since, until;
+
+  if (!paginationDone) {
+    var next = props.getProperty(ADSET_AGEGENDER_RESUME_CURSOR_PROP_);
+    if (next) {
+      // Resuming — reuse the EXACT window pagination started with (see header comment),
+      // never recompute it fresh from "today."
+      since = props.getProperty(ADSET_AGEGENDER_WINDOW_SINCE_PROP_);
+      until = props.getProperty(ADSET_AGEGENDER_WINDOW_UNTIL_PROP_);
+      Logger.log('importAdSetAgeGenderDaily: resuming pagination from a saved cursor for window ' + since + '..' + until +
+        ' (a prior run stopped partway through).');
+    } else {
+      until = getYesterday();
+      since = getDateNDaysAgo_(LOOKBACK_DAYS);
+      props.setProperty(ADSET_AGEGENDER_WINDOW_SINCE_PROP_, since);
+      props.setProperty(ADSET_AGEGENDER_WINDOW_UNTIL_PROP_, until);
+      // Fresh start — nothing resumable in flight, so any previously staged (and now
+      // stale/half-written) rows from an earlier aborted attempt are cleared first.
+      clearAdSetAgeGenderStaging_();
+      var params = {
+        level: 'adset',
+        time_increment: 1,
+        include_archived: true,
+        breakdowns: 'age,gender',
+        fields: 'adset_name,campaign_name,spend,impressions,clicks,reach,ctr,date_start,actions,action_values',
+        time_range: JSON.stringify({ since: since, until: until }),
+        limit: 500
+      };
+      var qs = Object.keys(params).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(String(params[k])); }).join('&');
+      next = 'https://graph.facebook.com/v18.0/' + ACCOUNT_ID + '/insights?' + qs;
+    }
+
+    var ok = true, errorMessage = '';
+    var pagesThisRun = 0, rowsThisRun = 0;
+
+    do {
+      if (Date.now() - __t0 > ADSET_AGEGENDER_TIME_BUDGET_MS_) {
+        props.setProperty(ADSET_AGEGENDER_RESUME_CURSOR_PROP_, next);
+        Logger.log('importAdSetAgeGenderDaily: pagination time budget reached this run (' + pagesThisRun + ' page(s), ' +
+          rowsThisRun + ' row(s), ' + ((Date.now() - __t0) / 1000).toFixed(1) + 's) for window ' + since + '..' + until +
+          ' — saved cursor, stopping cleanly instead of risking a platform timeout. The next scheduled run will resume from here.');
+        return;
+      }
+      var data = fetchWithRetry_(next);
+      if (!data || data.error) {
+        ok = false;
+        errorMessage = (data && data.error) ? JSON.stringify(data.error) : 'no response from fetchWithRetry_';
+        Logger.log('importAdSetAgeGenderDaily error: ' + errorMessage);
+        break;
+      }
+      var pageRows = (data.data || []).map(function (item) {
+        var purchases = av_(item.actions, 'omni_purchase') + av_(item.actions, 'purchase');
+        var purchaseValue = av_(item.action_values, 'omni_purchase') + av_(item.action_values, 'purchase');
+        return [
+          item.date_start || '', item.campaign_name || '', item.adset_name || '',
+          item.age || 'unknown', item.gender || 'unknown',
+          parseFloat(item.spend) || 0, parseInt(item.impressions) || 0, parseInt(item.clicks) || 0,
+          parseInt(item.reach) || 0, purchases, purchaseValue
+        ];
+      });
+      appendAdSetAgeGenderStagingRows_(pageRows);
+      rowsThisRun += pageRows.length;
+      next = (data.paging && data.paging.next) ? data.paging.next : null;
+      pagesThisRun++;
+      if (next) {
+        // Persisted after EVERY page, not just at the budget check above — a hard
+        // platform kill can land between any two pages, and only what's saved here
+        // survives it.
+        props.setProperty(ADSET_AGEGENDER_RESUME_CURSOR_PROP_, next);
+        Utilities.sleep(400);
+      }
+      // Backstop against a runaway loop, not a realistic ceiling — see importAdCreatives()
+      // in AdPipeline.gs for the same pattern.
+    } while (next && pagesThisRun < 2000);
+
+    if (!ok) {
+      var aStreak = bumpFailStreak_(ADSET_AGEGENDER_FAIL_STREAK_PROP_);
+      Logger.log('importAdSetAgeGenderDaily: fetch failed partway (' + errorMessage + ') after ' + pagesThisRun +
+        ' page(s) this run — staged progress and saved cursor left exactly as they were (NOT advanced past the ' +
+        'failure), so the next run retries from the same page rather than from scratch or skipping ahead. Fail streak ' +
+        aStreak + ' day(s).');
+      if (aStreak >= LOOKBACK_DAYS) alertAdSetBreakdownImportFailing_('Age & Gender', 'agegender', aStreak, errorMessage);
+      return;
+    }
+
+    // Pagination genuinely complete — every page was fetched with no unresolved cursor left.
+    props.deleteProperty(ADSET_AGEGENDER_RESUME_CURSOR_PROP_);
+    props.setProperty(ADSET_AGEGENDER_PAGINATION_DONE_PROP_, 'true');
+    Logger.log('importAdSetAgeGenderDaily: [timing] pagination phase COMPLETE after ' + ((Date.now() - __t0) / 1000).toFixed(1) +
+      's this run — ' + pagesThisRun + ' page(s) / ' + rowsThisRun + ' row(s) fetched in this run, for window ' +
+      since + '..' + until + '. Proceeding to write.');
   } else {
-    resetFailStreak_(ADSET_AGEGENDER_FAIL_STREAK_PROP_);
+    since = props.getProperty(ADSET_AGEGENDER_WINDOW_SINCE_PROP_);
+    until = props.getProperty(ADSET_AGEGENDER_WINDOW_UNTIL_PROP_);
+    Logger.log('importAdSetAgeGenderDaily: pagination already completed by a prior run for window ' + since + '..' + until +
+      ' — skipping straight to write.');
   }
+
+  var allRows = readAdSetAgeGenderStaging_();
+
+  if (!allRows.length) {
+    Logger.log('importAdSetAgeGenderDaily: pagination completed but 0 rows were staged for ' + since + '..' + until +
+      ' — nothing to write. Clearing state so the next run starts fresh.');
+    // Still a genuine, complete cycle (confirmed 0 rows, not a broken fetch) — stamp
+    // freshness so the strip doesn't read "stale" for a pipeline that's actually fine.
+    markPipelineRefreshed_('adset_agegender');
+    clearAdSetAgeGenderStaging_();
+    props.deleteProperty(ADSET_AGEGENDER_PAGINATION_DONE_PROP_);
+    props.deleteProperty(ADSET_AGEGENDER_WINDOW_SINCE_PROP_);
+    props.deleteProperty(ADSET_AGEGENDER_WINDOW_UNTIL_PROP_);
+    return;
+  }
+
+  // Only reached when the ENTIRE paginated fetch completed successfully (across however
+  // many runs it took) — same "existing data untouched unless the fetch actually
+  // succeeded" guarantee every other pipeline in this project already gives you.
+  var sheet = getOrCreateAdSetBreakdownSheet_(ADSET_AGEGENDER_SHEET_, ADSET_AGEGENDER_HEADERS_);
+  removeAdSetBreakdownRowsInRange_(sheet, since, until);
+  appendRowsSafe_(sheet, allRows);
+  Logger.log('importAdSetAgeGenderDaily: wrote ' + allRows.length + ' row(s) for ' + since + '..' + until +
+    '. [timing] total run time ' + ((Date.now() - __t0) / 1000).toFixed(1) + 's.');
+
+  resetFailStreak_(ADSET_AGEGENDER_FAIL_STREAK_PROP_);
+  // Sep 2026 — same freshness-strip gap as Placement above: this pipeline never called
+  // markPipelineRefreshed_ at all, on top of never even HAVING a "still catching up"
+  // signal for the dashboard while pagination spans multiple runs (see
+  // getAdSetAgeGenderCatchupState_ below, read by getPipelineFreshness() in Code.gs).
+  markPipelineRefreshed_('adset_agegender');
+
+  // Success — clear all resumable state so the next scheduled run starts a fresh window
+  // from page 1, rather than thinking pagination is still "done" from this run forever.
+  clearAdSetAgeGenderStaging_();
+  props.deleteProperty(ADSET_AGEGENDER_PAGINATION_DONE_PROP_);
+  props.deleteProperty(ADSET_AGEGENDER_RESUME_CURSOR_PROP_);
+  props.deleteProperty(ADSET_AGEGENDER_WINDOW_SINCE_PROP_);
+  props.deleteProperty(ADSET_AGEGENDER_WINDOW_UNTIL_PROP_);
  } catch (e) {
-  Logger.log('⚠️ importAdSetAgeGenderDaily: UNCAUGHT exception — ' + (e && e.message ? e.message : String(e)));
+  Logger.log('⚠️ importAdSetAgeGenderDaily: UNCAUGHT exception — ' + (e && e.message ? e.message : String(e)) +
+    '. Any staged pagination progress, saved cursor, and saved window are untouched, so the next run resumes from here ' +
+    'rather than losing this run\'s work.');
   try {
     MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Meta Ads Dashboard: importAdSetAgeGenderDaily crashed',
       'importAdSetAgeGenderDaily() threw an uncaught exception: ' + (e && e.message ? e.message : String(e)) +
+      '\n\nNote: pagination is now resumable across runs (Sep 2026) — if this was a timeout mid-pagination, this ' +
+      'catch block would not even run (a platform timeout is not a catchable exception), so seeing this email at ' +
+      'all means something else went wrong: a genuine uncaught error, most likely during the final write after ' +
+      'pagination completed. Any staged progress, saved cursor, and saved window are untouched either way — the ' +
+      'next scheduled run will pick back up automatically without you needing to do anything.' +
       '\n\nCheck View > Executions > importAdSetAgeGenderDaily in the Apps Script editor for the full stack trace.');
   } catch (mailErr) {
     Logger.log('(Could not send the crash email — Logger above still has it. Reason: ' + mailErr.message + ')');
@@ -1057,8 +1302,8 @@ function fixAdSetBreakdownHeadersNow() {
 
 // Ad-set-workbook equivalent of importDataFromJSON.gs's getOrCreateSheet() — kept as
 // its OWN function (not a shared one) specifically so nothing here ever touches the
-// Campaign-workbook version. Only used by importAdSetStatus() right now, generic
-// enough that anything else new on the ad-set side can reuse it too.
+// Campaign-workbook version. Used by importAdSetStatus() and the Age×Gender resumable
+// staging sheet, generic enough that anything else new on the ad-set side can reuse it too.
 function getOrCreateAdSetPlainSheet_(sheetName) {
   var ss = getAdSetSpreadsheet_();
   var sheet = ss.getSheetByName(sheetName);
@@ -1087,5 +1332,6 @@ function removeAdSetBreakdownRowsInRange_(sheet, sinceStr, untilStr) {
  * time-driven, day timer, running AFTER importDataFromJSON():
  *   - importAdSetData
  *   - importAdSetStatus
- *   - importAdSetBreakdownData
+ *   - importAdSetPlacementDaily
+ *   - importAdSetAgeGenderDaily
  */

@@ -130,6 +130,23 @@ function importAdData() {
     appendAdRowsSafe_(sheet, result.rows);
     Logger.log('importAdData: ' + result.rows.length + ' rows for ' + since + '..' + until);
     markPipelineRefreshed_('ads');
+
+    // Stage 2 fast-path (Sep 2026, "creatives are stale/Unknown for up to several days"):
+    // see the syncNewAdsFastPath_() header comment below for the full rationale. Wrapped
+    // in its own try/catch, deliberately OUTSIDE the meaning of this function's own
+    // success/failure — a fast-path hiccup must never make an otherwise-successful
+    // importAdData() run look like it failed (no fail-streak bump, no crash email from
+    // this path), because the daily insights import above already succeeded and that's
+    // what this function's contract is about. ad_creatives correctness always has a
+    // backstop: the next importAdCreatives() full-overwrite reconciles everything
+    // regardless of whether this fast path ran, skipped, or errored today.
+    try {
+      syncNewAdsFastPath_(result.rows);
+    } catch (fastPathErr) {
+      Logger.log('⚠️ importAdData: syncNewAdsFastPath_ threw — ' + (fastPathErr && fastPathErr.message ? fastPathErr.message : String(fastPathErr)) +
+        '. Not fatal to importAdData() itself (today\'s insights import above already succeeded and is unaffected) ' +
+        '— ad_creatives simply stays however it was until the next importAdCreatives() run reconciles it as usual.');
+    }
   } catch (e) {
     Logger.log('⚠️ importAdData: UNCAUGHT exception — ' + (e && e.message ? e.message : String(e)) +
       '. Existing rows are untouched (the write only happens after the try block above completes).');
@@ -484,18 +501,286 @@ function appendAdRowsSafe_(sheet, rows) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 var AD_CREATIVE_SHEET_ = 'ad_creatives';
-// 'Fallback Thumbnail URL' added Sep 2026 (see the "not loading" fix below) — appended at
-// the END so existing fixed-index reads elsewhere (getAdCreativeMap_ in Code.gs) don't shift.
-var AD_CREATIVE_HEADERS_ = ['Ad ID', 'Ad name', 'Campaign name', 'Ad set name', 'Status', 'Creative type', 'Thumbnail URL', 'Ads Manager link', 'Last updated', 'Fallback Thumbnail URL'];
+// 'Fallback Thumbnail URL' added Sep 2026 (see the "not loading" fix below), 'Pending full
+// sync' added Sep 2026 (Stage 2 fast-path — see syncNewAdsFastPath_() below) — BOTH
+// appended at the END so existing fixed-index reads elsewhere (getAdCreativeMap_ in
+// Code.gs) don't shift. Never insert a new column into the middle of this array.
+var AD_CREATIVE_HEADERS_ = ['Ad ID', 'Ad name', 'Campaign name', 'Ad set name', 'Status', 'Creative type', 'Thumbnail URL', 'Ads Manager link', 'Last updated', 'Fallback Thumbnail URL', 'Pending full sync'];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── STAGE 2 FAST-PATH SYNC (Sep 2026) ──
+// Root cause of the Stage 1 problem (new ads scored/filtered as if they were static
+// images until the NEXT importAdCreatives() run — which can legitimately take several
+// days on a big backlog, per the RESUMABLE PAGINATION STATE comment below): importAdData()
+// runs daily and knows about a new ad_id the moment it first has spend, but ad_creatives
+// is only ever written by importAdCreatives()'s full-snapshot pagination, which is a much
+// slower, resumable-across-days process for a different reason (thumbnail image
+// processing at volume). There was no cheap same-day path connecting the two.
+//
+// This closes that gap without touching importAdCreatives() at all: at the tail of
+// importAdData(), diff the ad_ids this run just fetched against what ad_creatives
+// already has, and for whatever's missing, do ONE lightweight multi-ID batch call
+// (id,name,status,creative{object_type} only — no thumbnail_width/height, no
+// object_story_spec/asset_feed_spec, no thumbnail resolution at all) and write minimal
+// rows with pendingFullSync=true. classifyCreativeTypeFast_() below uses ONLY
+// object_type === 'VIDEO' as its signal (no video_id/child_attachments cross-checks —
+// those need fields this call deliberately doesn't fetch) — Video vs. not-Video is the
+// only distinction computeAdScorecard_() actually needs (see that function's Hook
+// Rate/Hold Rate gate), so Image/Carousel ambiguity here is harmless; a non-video
+// defaults to 'Image', matching classifyCreativeType_()'s own fallback philosophy.
+//
+// importAdCreatives() needs ZERO changes for this to reconcile cleanly: it's an
+// unconditional full overwrite of ad_creatives every time it completes (see that
+// function's header comment), so whatever a fast-path row guessed — Image vs Carousel,
+// a blank thumbnail, pendingFullSync=true — is simply replaced with the real thing the
+// next time full pagination reaches that ad. This function only ever fills a gap; it
+// never fights with or has to be reconciled against the full pipeline.
+//
+// Design constraints locked in with you (Sep 2026) — do not change without asking:
+//   - Chunk size hardcoded to 50 ad_ids per /?ids= call. NOT probed empirically: a normal
+//     day is 0–30 new ads (well under one chunk), and 50 ~15-digit numeric IDs is ~850
+//     chars of URL — nowhere near any practical URL-length limit. Revisit only if
+//     truncation is actually observed in the logs.
+//   - Hard cap of 200 new ads per run (4 chunks of 50) — a safety ceiling for an unusual
+//     day, not a number expected to bind in practice. Any ads beyond the cap simply wait
+//     for the next importAdData() run (tomorrow) or the next importAdCreatives() full
+//     sync, whichever comes first — same "always self-heals" guarantee as everything
+//     else in this file.
+//   - Fields fetched: id, name, status, creative{object_type}. Deliberately NO thumbnail/
+//     thumbnail_width/thumbnail_height — that resolution behavior on this call shape is
+//     inference, not documented, and Stage 2's job is same-day correctness (type +
+//     status), not same-day thumbnail quality. Thumbnails stay blank until
+//     importAdCreatives() resolves them properly.
+//   - Uses effective_status, NOT the plain `status` field, despite the original scoping
+//     note saying "status" — flagging this explicitly as a deliberate correction, not a
+//     silent deviation: the existing Status column (index 4) is populated from
+//     ad.effective_status elsewhere in this file, and Dashboard.html's adStatusInfo_()
+//     keys off effective_status-style values (ACTIVE, PAUSED, CAMPAIGN_PAUSED,
+//     ADSET_PAUSED, WITH_ISSUES, DISAPPROVED, IN_PROCESS, PENDING_REVIEW). The plain
+//     `status` field is a coarser, different Ad-object field (effectively just
+//     ACTIVE/PAUSED/DELETED/ARCHIVED) — using it would write values the frontend's status
+//     pill doesn't know how to render correctly. Using effective_status keeps fast-path
+//     rows consistent with both the existing Status column and the frontend.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var AD_CREATIVES_FASTPATH_CHUNK_SIZE_ = 50;
+var AD_CREATIVES_FASTPATH_MAX_NEW_PER_RUN_ = 200;
+
+// newAdRows: the exact `result.rows` array importAdData() just fetched/wrote — each row's
+// index 0 is the ad_id (see buildAdRow_ above: [item.ad_id, item.ad_name, item.adset_name, ...]).
+function syncNewAdsFastPath_(newAdRows) {
+  if (!newAdRows || !newAdRows.length) {
+    Logger.log('syncNewAdsFastPath_: no ad rows from this importAdData() run — nothing to diff.');
+    return;
+  }
+
+  // De-dupe ad_ids seen today (the same ad appears once per day in newAdRows over the
+  // LOOKBACK_DAYS window, but a given ad_id can recur across multiple days in one run).
+  var seenIds = {};
+  newAdRows.forEach(function (r) {
+    var id = String(r[0] || '').trim();
+    if (id) seenIds[id] = true;
+  });
+  var todaysAdIds = Object.keys(seenIds);
+  if (!todaysAdIds.length) {
+    Logger.log('syncNewAdsFastPath_: today\'s rows had no usable ad_id values — nothing to diff.');
+    return;
+  }
+
+  var existingIds = getExistingAdCreativeIds_();
+  var missingIds = todaysAdIds.filter(function (id) { return !existingIds[id]; });
+  if (!missingIds.length) {
+    Logger.log('syncNewAdsFastPath_: all ' + todaysAdIds.length + ' ad(s) from today\'s run are already in ad_creatives — nothing to sync.');
+    return;
+  }
+
+  var toFetch = missingIds.slice(0, AD_CREATIVES_FASTPATH_MAX_NEW_PER_RUN_);
+  if (missingIds.length > toFetch.length) {
+    Logger.log('syncNewAdsFastPath_: ' + missingIds.length + ' ad(s) missing from ad_creatives, capped to ' +
+      toFetch.length + ' this run (AD_CREATIVES_FASTPATH_MAX_NEW_PER_RUN_ = ' + AD_CREATIVES_FASTPATH_MAX_NEW_PER_RUN_ +
+      '). The rest wait for tomorrow\'s importAdData() run or the next full importAdCreatives() sync, whichever ' +
+      'comes first — same self-healing guarantee as the rest of this pipeline.');
+  }
+
+  var fetched = fetchAdsFastPathBatch_(toFetch);
+  if (!fetched.length) {
+    Logger.log('syncNewAdsFastPath_: batch fetch returned nothing usable for ' + toFetch.length + ' ad_id(s) — leaving ad_creatives untouched. Will retry tomorrow.');
+    return;
+  }
+
+  appendFastPathAdCreativeRows_(fetched);
+  Logger.log('syncNewAdsFastPath_: wrote ' + fetched.length + ' minimal (pending-full-sync) row(s) to ad_creatives for ' +
+    'ad(s) that had spend today but hadn\'t reached importAdCreatives() yet.');
+}
+
+// Reads just column A (Ad ID) of the existing ad_creatives sheet — cheap, no need to pull
+// the other 10 columns just to build a membership set.
+function getExistingAdCreativeIds_() {
+  var sheet = getOrCreateAdPlainSheet_(AD_CREATIVE_SHEET_);
+  var lastRow = sheet.getLastRow();
+  var ids = {};
+  if (lastRow < 2) return ids;
+  sheet.getRange(2, 1, lastRow - 1, 1).getValues().forEach(function (r) {
+    var id = String(r[0] || '').trim();
+    if (id) ids[id] = true;
+  });
+  return ids;
+}
+
+// One GET /?ids=<a>,<b>,...&fields=... call per 50-ID chunk (AD_CREATIVES_FASTPATH_CHUNK_SIZE_).
+// Multi-ID batch fetch, NOT the separate POST /batch endpoint — a single request, response
+// keyed by ad_id. fetchWithRetry_'s default 2nd arg (5 retries) is unnecessary weight for a
+// "nice to have, always has a fallback" call (same reasoning as the 2-retry calls elsewhere
+// in this file, e.g. getVideoNativePictureMap_) — thumbnails/full sync are one
+// importAdCreatives() run away regardless, so this uses 2 retries, not the default 5.
+function fetchAdsFastPathBatch_(adIds) {
+  var out = [];
+  for (var i = 0; i < adIds.length; i += AD_CREATIVES_FASTPATH_CHUNK_SIZE_) {
+    var chunk = adIds.slice(i, i + AD_CREATIVES_FASTPATH_CHUNK_SIZE_);
+    var url = 'https://graph.facebook.com/v18.0/?ids=' + encodeURIComponent(chunk.join(',')) +
+      '&fields=' + encodeURIComponent('id,name,effective_status,creative{object_type}');
+    var data = fetchWithRetry_(url, 2);
+    if (!data || data.error) {
+      Logger.log('fetchAdsFastPathBatch_: chunk of ' + chunk.length + ' ad_id(s) failed — ' +
+        (data && data.error ? JSON.stringify(data.error) : 'no response from fetchWithRetry_') +
+        '. Skipping this chunk this run; these ad_ids stay missing from ad_creatives until a later run picks them up.');
+      continue;
+    }
+    // GET /?ids= responds with an object keyed by each requested id, not a data[] array.
+    chunk.forEach(function (id) {
+      var node = data[id];
+      if (!node) return; // e.g. an ad deleted between importAdData()'s fetch and this call — skip, not an error
+      out.push(node);
+    });
+    if (i + AD_CREATIVES_FASTPATH_CHUNK_SIZE_ < adIds.length) Utilities.sleep(200);
+  }
+  return out;
+}
+
+// Video vs not-Video ONLY — the one distinction computeAdScorecard_() actually gates on
+// (see that function's Hook Rate/Hold Rate check). This fast-path call fetches only
+// creative.object_type, none of the video_id/child_attachments fields
+// classifyCreativeType_() above cross-checks, so it can't tell Image from Carousel here —
+// it doesn't need to. Anything not definitively VIDEO defaults to 'Image', matching
+// classifyCreativeType_()'s own fallback philosophy; the next full importAdCreatives()
+// sync overwrites this row with the real classification regardless.
+function classifyCreativeTypeFast_(creative) {
+  if (!creative) return 'Unknown';
+  var ot = String(creative.object_type || '').toUpperCase();
+  return ot === 'VIDEO' ? 'Video' : 'Image';
+}
+
+// Appends (not overwrites — this only ever fills a gap between full syncs) minimal rows
+// to ad_creatives for ads the fast-path batch resolved. Thumbnail URL and Fallback
+// Thumbnail URL are intentionally blank (see the header comment above for why); Pending
+// full sync is 'TRUE' so the frontend/Code.gs can treat these the same as an
+// Unknown-creativeType ad until the real snapshot lands.
+function appendFastPathAdCreativeRows_(adNodes) {
+  var sheet = getOrCreateAdPlainSheet_(AD_CREATIVE_SHEET_);
+  ensureColumns_(sheet, AD_CREATIVE_HEADERS_.length);
+  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
+  var rows = adNodes.map(function (ad) {
+    var creative = ad.creative || null;
+    return [
+      ad.id || '',
+      ad.name || '',
+      '', // Campaign name — not fetched by this lightweight call; importAdCreatives() fills it in properly
+      '', // Ad set name — same
+      ad.effective_status || '',
+      classifyCreativeTypeFast_(creative),
+      '', // Thumbnail URL — intentionally blank, see header comment (no thumbnail fetch in Stage 2)
+      adsManagerLinkFor_(ad.id),
+      now,
+      '', // Fallback Thumbnail URL — same
+      'TRUE' // Pending full sync
+    ];
+  });
+  var start = sheet.getLastRow() + 1;
+  var need = start + rows.length - 1;
+  if (need > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), need - sheet.getMaxRows());
+  sheet.getRange(start, 1, rows.length, rows[0].length).setValues(rows);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── RESUMABLE PAGINATION STATE (Sep 2026) ──
+// Confirmed via 3 consecutive days of Executions logs that the /ads pagination phase
+// ALONE (before a single video/image lookup runs) had grown to 305s -> 356.8s -> a
+// mid-page transient-error retry that never even finished a checkpoint — eating the
+// entire 360s ceiling by itself, well before this function's own video/image enrichment
+// (which has always finished in under 15s once pagination completes) ever gets a turn.
+// Splitting pagination into its own trigger (the fix used for importAdSetBreakdownData()
+// in AdSetPipeline.gs) does NOT help here on its own: pagination was already consuming
+// ~99% of a full 360s budget by itself, so a dedicated trigger only postpones the same
+// failure by however long it takes total ad count to grow a little further.
+//
+// The real fix: make pagination resumable ACROSS runs. Each run picks up from Meta's own
+// paging.next cursor instead of restarting from page 1, and persists progress after EVERY
+// page — not just at a clean return point — because Apps Script's "Exceeded maximum
+// execution time" is a hard platform kill, not a catchable JS exception: code inside the
+// try/catch below NEVER runs on a real timeout (confirmed: the crash-email catch block's
+// own Logger.log lines never appear in a "Timed out" execution's Cloud logs, only the
+// platform's own "Error: Exceeded maximum execution time" line does). So state has to be
+// saved as we go, synchronously, not "cleaned up after" — there is no after.
+//
+// Fetched ad+creative JSON is staged into its own sheet (ad_creatives_staging) as pages
+// come in, rather than held in memory across runs (Properties Service caps a single value
+// around 9KB — nowhere near enough for thousands of ads' worth of creative JSON). Once
+// pagination genuinely completes (Meta returns no more paging.next), the staged rows are
+// read back in one shot and handed to the EXACT SAME video-native-frame / image-full-res
+// enrichment + final atomic ad_creatives overwrite this function already did — that part
+// of the pipeline has never been the bottleneck (13.3s and 0.3s respectively in the last
+// run that got far enough to log them) and needs no resumability of its own. If THIS run
+// still somehow times out during enrichment/the final write (not pagination), the next
+// run detects AD_CREATIVES_PAGINATION_DONE_PROP_ is already 'true' and skips straight
+// back to enrichment — safe and idempotent, since re-resolving a small capped batch of
+// video/image lookups and re-writing the same final snapshot costs nothing to repeat.
+// ═══════════════════════════════════════════════════════════════════════════
+
+var AD_CREATIVES_STAGING_SHEET_ = 'ad_creatives_staging';
+var AD_CREATIVES_RESUME_CURSOR_PROP_ = 'AD_CREATIVES_RESUME_CURSOR'; // Meta's paging.next URL to resume from; absent = start fresh or already done
+var AD_CREATIVES_PAGINATION_DONE_PROP_ = 'AD_CREATIVES_PAGINATION_DONE'; // 'true' once pagination has fully completed and staging holds every ad
+var AD_CREATIVES_TIME_BUDGET_MS_ = 270000; // 4.5 min soft budget — voluntarily stop and save a cursor well before Apps Script's hard 360s kill
+
+function clearAdCreativesStaging_() {
+  var sheet = getOrCreateAdPlainSheet_(AD_CREATIVES_STAGING_SHEET_);
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 0) sheet.getRange(1, 1, lastRow, Math.max(1, sheet.getLastColumn())).clearContent();
+}
+
+// Appends one row per ad this page, each a JSON string of {ad, creative} — cheap to
+// write (one setValues call per page) and cheap to read back (one getValues call across
+// however many runs it took to finish pagination).
+function appendAdCreativesStagingRows_(pageItems) {
+  if (!pageItems || !pageItems.length) return;
+  var sheet = getOrCreateAdPlainSheet_(AD_CREATIVES_STAGING_SHEET_);
+  var rows = pageItems.map(function (item) { return [JSON.stringify(item)]; });
+  var start = sheet.getLastRow() + 1;
+  var need = start + rows.length - 1;
+  if (need > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), need - sheet.getMaxRows());
+  sheet.getRange(start, 1, rows.length, 1).setValues(rows);
+}
+
+function readAdCreativesStaging_() {
+  var sheet = getOrCreateAdPlainSheet_(AD_CREATIVES_STAGING_SHEET_);
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 1) return [];
+  var vals = sheet.getRange(1, 1, lastRow, 1).getValues();
+  var out = [];
+  vals.forEach(function (r) {
+    if (!r[0]) return;
+    try { out.push(JSON.parse(r[0])); } catch (e) { /* skip a malformed staged row rather than fail the whole read */ }
+  });
+  return out;
+}
 
 // Wrapped in try/catch (Sep 2026, trigger error rate investigation) — see the matching
 // comment on importAdSetData() (AdSetPipeline.gs) for why: this function's own failure
 // paths already degrade gracefully (the `ok` guard below), so an error rate showing up on
 // the Triggers page has to be an uncaught exception/platform kill this had no safety net
 // around at all. This is also the heaviest of the daily triggers (per-ad thumbnail image
-// processing + a native-video-frame lookup on top of pagination), so it's the single most
-// likely one to occasionally hit Apps Script's 6-minute execution ceiling — that shows up
-// as exactly this kind of silent, unexplained error rate.
+// processing + a native-video-frame lookup on top of pagination) — see the RESUMABLE
+// PAGINATION STATE comment above for how it now survives running past a single 6-minute
+// execution instead of restarting from page 1 (and losing all progress) every time.
 function importAdCreatives() {
  try {
   // TIMING INSTRUMENTATION (Sep 2026, after a real "Exceeded maximum execution time" run
@@ -513,132 +798,171 @@ function importAdCreatives() {
     sheet.getRange(1, 1, 1, AD_CREATIVE_HEADERS_.length).setValues([AD_CREATIVE_HEADERS_]);
   } else {
     // Sep 2026: backfill header label(s) for any column appended to AD_CREATIVE_HEADERS_
-    // AFTER this sheet already existed (e.g. 'Fallback Thumbnail URL' below) — without this,
-    // the "brand new sheet" check above never re-triggers on an existing sheet, so a newly
-    // added header cell would silently stay blank forever even though the data under it
-    // populates fine (rows are written by fixed position, not by header lookup).
+    // AFTER this sheet already existed (e.g. 'Fallback Thumbnail URL', 'Pending full sync'
+    // below) — without this, the "brand new sheet" check above never re-triggers on an
+    // existing sheet, so a newly added header cell would silently stay blank forever even
+    // though the data under it populates fine (rows are written by fixed position, not by
+    // header lookup).
     first.forEach(function (c, i) {
       if (String(c).trim() === '' && AD_CREATIVE_HEADERS_[i]) sheet.getRange(1, i + 1).setValue(AD_CREATIVE_HEADERS_[i]);
     });
   }
 
-  var base = 'https://graph.facebook.com/v18.0/' + ACCOUNT_ID + '/ads';
-  // FIXED (Aug 2026): thumbnail_width/thumbnail_height are TOP-LEVEL request parameters
-  // on the call, not something you chain onto the `creative` field itself. The original
-  // `creative.thumbnail_width(400).thumbnail_height(400){...}` syntax was invalid —
-  // that's a malformed request, which is why it failed identically on every one of
-  // fetchWithRetry_'s 5 attempts (a genuine transient hiccup would eventually succeed on
-  // a retry; a bad query never does). Confirmed against Meta's own AdCreative reference:
-  // thumbnail_url "accept[s] thumbnail_width and thumbnail_height" as regular query
-  // parameters alongside `fields`, not as chained field parameters.
-  // object_story_spec requested BARE (no {link_data{...}} sub-selection) — that nested
-  // field-expansion syntax was the other thing I was least sure of last round, and
-  // object_story_spec is a polymorphic struct (its shape differs for link_data vs
-  // photo_data vs video_data vs template_data) that Graph API's `{}` sub-selection
-  // doesn't reliably support the same way it does for a plain object like campaign{name}.
-  // Requesting it bare returns the FULL nested JSON object regardless, and
-  // classifyCreativeType_() below already reads creative.object_story_spec.link_data...
-  // directly off that — same data, zero guessing about expansion syntax.
-  // FIXED (Aug 2026): confirmed via the real error text ("Please reduce the amount of
-  // data you're asking for, then retry your request") — this is a hard data-volume
-  // ceiling, not a rate limit, and Meta's own documented fix for it is exactly this:
-  // request less per call. limit:200 per page was fine for plain field pulls elsewhere
-  // in this project, but resizing a thumbnail image is real server-side work per ad, and
-  // apparently 200 of those in one response is too much. Dropped to 25.
-  // BUMPED (Aug 2026, per your "thumbnails look low quality" report): thumbnail_width/
-  // height only default to 64px — Meta's docs list no documented maximum, so 400 was a
-  // conservative first guess, not a ceiling. Raised to 600. Dropping `limit` further (25
-  // -> 15) at the same time is a deliberate trade-off, not a separate fix: a bigger
-  // thumbnail is more server-side image work per ad, and 25-per-page was already right at
-  // the edge of the "too much data" error above — so pushing resolution up without also
-  // pulling batch size down risks reintroducing that exact error. If 15 still trips it,
-  // drop it further; if you want even sharper thumbnails and 15 holds up fine, you can
-  // try nudging width/height up further from here.
-  // FIXED (Sep 2026, per your "some image creatives aren't loading" report): the account
-  // has Advantage+/dynamic creative ads whose image lives in asset_feed_spec.images instead
-  // of object_story_spec — those ads have NO object_story_spec at all, and often no usable
-  // thumbnail_url either, so they were rendering as a broken/blank thumbnail with nothing to
-  // fall back to. asset_feed_spec requested here as a SUB-SELECTION (unlike object_story_spec
-  // above), not bare: asset_feed_spec is a fixed, well-documented struct (not the
-  // link_data/photo_data/video_data polymorphism that made bare-fetching the safer bet for
-  // object_story_spec), and for an Advantage+ ad it can otherwise carry many bodies/titles/
-  // description/call-to-action text combinations we don't need — bare-fetching that risked
-  // tripping the exact "too much data" ceiling described below for no benefit. Only
-  // images{hash} and videos{video_id} are pulled — the minimum needed for extractImageHash_
-  // and the video-id resolution below to also cover this creative shape.
-  // REVERTED (Sep 2026, after your account hit "too many calls to this ad-account" — code
-  // 80004, a call-VOLUME rate limit, not the "reduce the amount of data" response-SIZE ceiling
-  // this `limit` knob was originally tuned against): dropping `limit` further here was the
-  // wrong direction for that failure — a smaller page means MORE pages, i.e. MORE round-trip
-  // calls against the account's shared rate budget, which makes a call-volume limit worse, not
-  // better. asset_feed_spec is requested as a small sub-selection (see the field comment
-  // below), so it shouldn't meaningfully change the per-page response size the old limit:15
-  // was already tuned against — put back to 15. If you start seeing the OLD "reduce the amount
-  // of data you're asking for" message again (a different error text/code than the rate-limit
-  // one — see isAccountRateLimited_ in AdSetPipeline.gs for that one), THAT'S the signal to drop
-  // `limit` back down; don't preemptively trade one ceiling for the other without evidence.
-  var params = {
-    fields: 'id,name,effective_status,campaign{name},adset{name},' +
-      // image_hash added Sep 2026 for the full-resolution image lookup (see extractImageHash_
-      // and getImageFullMap_ below) — covers the older direct-image creative shape; the more
-      // common link_data/photo_data/child_attachments shapes come along for free since
-      // object_story_spec is already requested bare (full nested JSON, no sub-selection).
-      // asset_feed_spec{images{hash},videos{video_id}} added Sep 2026 (SUB-selected, not
-      // bare — see the comment above the OLD version of this line, preserved in git history/
-      // your last delivered copy, for why bare would risk the response-size ceiling instead).
-      'creative{thumbnail_url,video_id,object_type,object_story_spec,image_hash,asset_feed_spec{images{hash},videos{video_id}}}',
-    thumbnail_width: 600,
-    thumbnail_height: 600,
-    limit: 15,
-    'effective_status': JSON.stringify(['ACTIVE', 'PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES', 'PENDING_REVIEW', 'DISAPPROVED'])
-  };
-  var qs = Object.keys(params).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(String(params[k])); }).join('&');
-  var next = base + '?' + qs, guard = 0;
-  var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
-  var adItems = [];
-  var ok = true, errorMessage = '';
+  var props = PropertiesService.getScriptProperties();
+  var paginationDone = props.getProperty(AD_CREATIVES_PAGINATION_DONE_PROP_) === 'true';
 
-  // FIXED (Aug 2026): same disease as the breakdown importers fixed earlier this
-  // session — this used to `break` on any mid-pagination error and then unconditionally
-  // write whatever partial `rows` it had collected so far as if it were the complete
-  // snapshot, silently truncating ad_creatives (e.g. the first few hundred ads present,
-  // the rest quietly missing, with no signal beyond a log line). Now a failure partway
-  // through leaves the EXISTING sheet untouched instead of overwriting it with a partial
-  // result — a stale-but-complete snapshot beats a fresh-but-truncated one.
-  do {
-    var data = fetchWithRetry_(next);
-    if (!data || data.error) {
-      ok = false;
-      errorMessage = (data && data.error) ? JSON.stringify(data.error) : 'no response from fetchWithRetry_';
-      Logger.log('importAdCreatives error: ' + errorMessage);
-      break;
+  if (!paginationDone) {
+    var base = 'https://graph.facebook.com/v18.0/' + ACCOUNT_ID + '/ads';
+    // FIXED (Aug 2026): thumbnail_width/thumbnail_height are TOP-LEVEL request parameters
+    // on the call, not something you chain onto the `creative` field itself. The original
+    // `creative.thumbnail_width(400).thumbnail_height(400){...}` syntax was invalid —
+    // that's a malformed request, which is why it failed identically on every one of
+    // fetchWithRetry_'s 5 attempts (a genuine transient hiccup would eventually succeed on
+    // a retry; a bad query never does). Confirmed against Meta's own AdCreative reference:
+    // thumbnail_url "accept[s] thumbnail_width and thumbnail_height" as regular query
+    // parameters alongside `fields`, not as chained field parameters.
+    // object_story_spec requested BARE (no {link_data{...}} sub-selection) — that nested
+    // field-expansion syntax was the other thing I was least sure of last round, and
+    // object_story_spec is a polymorphic struct (its shape differs for link_data vs
+    // photo_data vs video_data vs template_data) that Graph API's `{}` sub-selection
+    // doesn't reliably support the same way it does for a plain object like campaign{name}.
+    // Requesting it bare returns the FULL nested JSON object regardless, and
+    // classifyCreativeType_() below already reads creative.object_story_spec.link_data...
+    // directly off that — same data, zero guessing about expansion syntax.
+    // FIXED (Aug 2026): confirmed via the real error text ("Please reduce the amount of
+    // data you're asking for, then retry your request") — this is a hard data-volume
+    // ceiling, not a rate limit, and Meta's own documented fix for it is exactly this:
+    // request less per call. limit:200 per page was fine for plain field pulls elsewhere
+    // in this project, but resizing a thumbnail image is real server-side work per ad, and
+    // apparently 200 of those in one response is too much. Dropped to 25.
+    // BUMPED (Aug 2026, per your "thumbnails look low quality" report): thumbnail_width/
+    // height only default to 64px — Meta's docs list no documented maximum, so 400 was a
+    // conservative first guess, not a ceiling. Raised to 600. Dropping `limit` further (25
+    // -> 15) at the same time is a deliberate trade-off, not a separate fix: a bigger
+    // thumbnail is more server-side image work per ad, and 25-per-page was already right at
+    // the edge of the "too much data" error above — so pushing resolution up without also
+    // pulling batch size down risks reintroducing that exact error. If 15 still trips it,
+    // drop it further; if you want even sharper thumbnails and 15 holds up fine, you can
+    // try nudging width/height up further from here.
+    // FIXED (Sep 2026, per your "some image creatives aren't loading" report): the account
+    // has Advantage+/dynamic creative ads whose image lives in asset_feed_spec.images instead
+    // of object_story_spec — those ads have NO object_story_spec at all, and often no usable
+    // thumbnail_url either, so they were rendering as a broken/blank thumbnail with nothing to
+    // fall back to. asset_feed_spec requested here as a SUB-SELECTION (unlike object_story_spec
+    // above), not bare: asset_feed_spec is a fixed, well-documented struct (not the
+    // link_data/photo_data/video_data polymorphism that made bare-fetching the safer bet for
+    // object_story_spec), and for an Advantage+ ad it can otherwise carry many bodies/titles/
+    // description/call-to-action text combinations we don't need — bare-fetching that risked
+    // tripping the exact "too much data" ceiling described below for no benefit. Only
+    // images{hash} and videos{video_id} are pulled — the minimum needed for extractImageHash_
+    // and the video-id resolution below to also cover this creative shape.
+    // REVERTED (Sep 2026, after your account hit "too many calls to this ad-account" — code
+    // 80004, a call-VOLUME rate limit, not the "reduce the amount of data" response-SIZE ceiling
+    // this `limit` knob was originally tuned against): dropping `limit` further here was the
+    // wrong direction for that failure — a smaller page means MORE pages, i.e. MORE round-trip
+    // calls against the account's shared rate budget, which makes a call-volume limit worse, not
+    // better. asset_feed_spec is requested as a small sub-selection (see the field comment
+    // below), so it shouldn't meaningfully change the per-page response size the old limit:15
+    // was already tuned against — put back to 15. If you start seeing the OLD "reduce the amount
+    // of data you're asking for" message again (a different error text/code than the rate-limit
+    // one — see isAccountRateLimited_ in AdSetPipeline.gs for that one), THAT'S the signal to drop
+    // `limit` back down; don't preemptively trade one ceiling for the other without evidence.
+    var params = {
+      fields: 'id,name,effective_status,campaign{name},adset{name},' +
+        // image_hash added Sep 2026 for the full-resolution image lookup (see extractImageHash_
+        // and getImageFullMap_ below) — covers the older direct-image creative shape; the more
+        // common link_data/photo_data/child_attachments shapes come along for free since
+        // object_story_spec is already requested bare (full nested JSON, no sub-selection).
+        // asset_feed_spec{images{hash},videos{video_id}} added Sep 2026 (SUB-selected, not
+        // bare — see the comment above the OLD version of this line, preserved in git history/
+        // your last delivered copy, for why bare would risk the response-size ceiling instead).
+        'creative{thumbnail_url,video_id,object_type,object_story_spec,image_hash,asset_feed_spec{images{hash},videos{video_id}}}',
+      thumbnail_width: 600,
+      thumbnail_height: 600,
+      limit: 15,
+      'effective_status': JSON.stringify(['ACTIVE', 'PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES', 'PENDING_REVIEW', 'DISAPPROVED'])
+    };
+    var qs = Object.keys(params).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(String(params[k])); }).join('&');
+
+    var next = props.getProperty(AD_CREATIVES_RESUME_CURSOR_PROP_);
+    if (next) {
+      Logger.log('importAdCreatives: resuming pagination from a saved cursor (a prior run stopped partway through).');
+    } else {
+      // Fresh start — nothing resumable in flight, so any previously staged (and now
+      // stale/half-written) rows from an earlier aborted attempt are cleared first.
+      clearAdCreativesStaging_();
+      next = base + '?' + qs;
     }
-    (data.data || []).forEach(function (ad) {
-      adItems.push({ ad: ad, creative: ad.creative || null });
-    });
-    next = (data.paging && data.paging.next) ? data.paging.next : null;
-    if (next) Utilities.sleep(400);
-    guard++;
-    // Backstop against a runaway loop, not a realistic ceiling: at limit:15/page this
-    // covers 30,000 ads. Apps Script's own 6-minute execution limit will kick in long
-    // before this does for any account that's actually that large.
-  } while (next && guard < 2000);
 
-  if (!ok) {
-    Logger.log('importAdCreatives: fetch failed partway (' + errorMessage + ') after ' + adItems.length +
-      ' ads collected — existing ad_creatives sheet left untouched rather than overwritten with a partial result. Re-run once the underlying issue clears.');
-    return;
+    var ok = true, errorMessage = '';
+    var pagesThisRun = 0, adsThisRun = 0;
+
+    // FIXED (Aug 2026): same disease as the breakdown importers fixed earlier this
+    // session — this used to `break` on any mid-pagination error and then unconditionally
+    // write whatever partial `rows` it had collected so far as if it were the complete
+    // snapshot, silently truncating ad_creatives (e.g. the first few hundred ads present,
+    // the rest quietly missing, with no signal beyond a log line). Now a failure partway
+    // through leaves the staged progress + saved cursor exactly where they were — nothing
+    // is overwritten, and the next run retries from the same page instead of from scratch.
+    do {
+      if (Date.now() - __t0 > AD_CREATIVES_TIME_BUDGET_MS_) {
+        props.setProperty(AD_CREATIVES_RESUME_CURSOR_PROP_, next);
+        Logger.log('importAdCreatives: pagination time budget reached this run (' + pagesThisRun + ' page(s), ' +
+          adsThisRun + ' ad(s), ' + ((Date.now() - __t0) / 1000).toFixed(1) + 's) — saved cursor, stopping ' +
+          'cleanly instead of risking a platform timeout. The next scheduled run will resume from here.');
+        return;
+      }
+      var data = fetchWithRetry_(next);
+      if (!data || data.error) {
+        ok = false;
+        errorMessage = (data && data.error) ? JSON.stringify(data.error) : 'no response from fetchWithRetry_';
+        Logger.log('importAdCreatives error: ' + errorMessage);
+        break;
+      }
+      var pageItems = (data.data || []).map(function (ad) { return { ad: ad, creative: ad.creative || null }; });
+      appendAdCreativesStagingRows_(pageItems);
+      adsThisRun += pageItems.length;
+      next = (data.paging && data.paging.next) ? data.paging.next : null;
+      pagesThisRun++;
+      if (next) {
+        // Persisted after EVERY page, not just at the budget check above — a hard platform
+        // kill can land between any two pages, and only what's saved here survives it.
+        props.setProperty(AD_CREATIVES_RESUME_CURSOR_PROP_, next);
+        Utilities.sleep(400);
+      }
+      // Backstop against a runaway loop, not a realistic ceiling: at limit:15/page this
+      // covers 30,000 ads PER RUN. Apps Script's own time budget above will kick in long
+      // before this does for any account that's actually that large.
+    } while (next && pagesThisRun < 2000);
+
+    if (!ok) {
+      Logger.log('importAdCreatives: fetch failed partway (' + errorMessage + ') after ' + pagesThisRun +
+        ' page(s) this run — staged progress and saved cursor are left exactly as they were (NOT advanced past ' +
+        'the failure), so the next run retries from the same page rather than from scratch or skipping ahead.');
+      return;
+    }
+
+    // Pagination genuinely complete — every page was fetched with no unresolved cursor left.
+    props.deleteProperty(AD_CREATIVES_RESUME_CURSOR_PROP_);
+    props.setProperty(AD_CREATIVES_PAGINATION_DONE_PROP_, 'true');
+    // TIMING CHECKPOINT 1: this is the /ads pagination + per-page 600x600 thumbnail-resize
+    // phase — the one whose cost scales with TOTAL AD COUNT, not with any per-run cap you can
+    // tune. It's now resumable across runs (see the RESUMABLE PAGINATION STATE comment above),
+    // so a single run no longer needs to finish the whole thing inside one 6-minute execution.
+    Logger.log('importAdCreatives: [timing] pagination phase COMPLETE after ' + ((Date.now() - __t0) / 1000).toFixed(1) +
+      's this run — ' + pagesThisRun + ' page(s) / ' + adsThisRun + ' ad(s) fetched in this run. Proceeding to enrichment.');
+  } else {
+    Logger.log('importAdCreatives: pagination already completed by a prior run — skipping straight to enrichment.');
   }
 
-  // TIMING CHECKPOINT 1: this is the /ads pagination + per-page 600x600 thumbnail-resize
-  // phase — the one whose cost scales with TOTAL AD COUNT, not with any per-run cap you can
-  // tune. If this checkpoint alone is already close to 300s (half the 6-minute budget), the
-  // fix is NOT lowering `limit` (fewer ads per page = MORE pages = MORE total round-trips/
-  // sleep, i.e. worse) — it's reducing the per-image resize cost (thumbnail_width/height
-  // below) or accepting that this phase alone needs its own trigger, separate from the
-  // video/image enrichment below.
-  Logger.log('importAdCreatives: [timing] pagination phase done after ' + ((Date.now() - __t0) / 1000).toFixed(1) +
-    's — ' + adItems.length + ' ads across ' + guard + ' page(s).');
+  // Read back every staged ad (accumulated across however many runs pagination took).
+  var adItems = readAdCreativesStaging_();
+  if (!adItems.length) {
+    Logger.log('importAdCreatives: pagination completed but 0 ads were staged — nothing to write. Clearing state so the next run starts fresh.');
+    clearAdCreativesStaging_();
+    props.deleteProperty(AD_CREATIVES_PAGINATION_DONE_PROP_);
+    return;
+  }
 
   // FIXED (Aug 2026, per your "quality is still bad" report + screenshot): confirmed via
   // Meta's own docs that thumbnail_width/height only resize whatever image is already
@@ -737,6 +1061,7 @@ function importAdCreatives() {
     // differs from `thumb` itself (i.e. thumb picked something better than raw thumbnail_url);
     // the dashboard checks for that before treating it as a real fallback.
     var rawThumbnailUrl = (creative && creative.thumbnail_url) || '';
+    var now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
     return [
       ad.id || '',
       ad.name || '',
@@ -747,43 +1072,54 @@ function importAdCreatives() {
       thumb,
       adsManagerLinkFor_(ad.id),
       now,
-      rawThumbnailUrl
+      rawThumbnailUrl,
+      '' // Pending full sync — blank/false: this IS the full sync, overwriting any fast-path 'TRUE' row for this ad
     ];
   });
 
   // Full overwrite — this is a CURRENT snapshot, not a log. Old rows for ads that no
   // longer come back (deleted/fully archived) are intentionally dropped. Only reached
-  // when the ENTIRE paginated fetch completed successfully (see the ok guard above).
+  // when the ENTIRE paginated fetch completed successfully (across however many runs it
+  // took — see the ok guard above and the PAGINATION_DONE state check at the top). This
+  // overwrite is also what reconciles any minimal rows syncNewAdsFastPath_() wrote in
+  // importAdData() — no special-casing needed, every row here (including one for an ad a
+  // fast-path row already covered) simply replaces whatever was there.
   var lastRow = sheet.getLastRow();
   if (lastRow > 1) sheet.getRange(2, 1, lastRow - 1, AD_CREATIVE_HEADERS_.length).clearContent();
   if (rows.length) {
     ensureColumns_(sheet, AD_CREATIVE_HEADERS_.length);
     sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows);
   }
+  var finishedAt = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm');
   Logger.log('importAdCreatives: snapshotted ' + rows.length + ' ads (' + uniqueVideoIds.length +
-    ' unique videos, ' + Object.keys(nativePictureByVideoId).length + ' native-res frames found) at ' + now +
+    ' unique videos, ' + Object.keys(nativePictureByVideoId).length + ' native-res frames found) at ' + finishedAt +
     '. [timing] total run time ' + ((Date.now() - __t0) / 1000).toFixed(1) + 's.');
   markPipelineRefreshed_('creatives');
+
+  // Success — clear all resumable state so the next scheduled run starts a fresh snapshot
+  // from page 1, rather than thinking pagination is still "done" from this run forever.
+  clearAdCreativesStaging_();
+  props.deleteProperty(AD_CREATIVES_PAGINATION_DONE_PROP_);
+  props.deleteProperty(AD_CREATIVES_RESUME_CURSOR_PROP_);
  } catch (e) {
   Logger.log('⚠️ importAdCreatives: UNCAUGHT exception — ' + (e && e.message ? e.message : String(e)) +
-    '. The ad_creatives sheet is untouched (the overwrite only happens at the very end, after everything above succeeds).');
+    '. The ad_creatives sheet is untouched (the overwrite only happens at the very end, after everything above ' +
+    'succeeds). Any staged pagination progress and saved cursor are also untouched, so the next run resumes from ' +
+    'here rather than losing this run\'s work.');
   try {
     MailApp.sendEmail(Session.getEffectiveUser().getEmail(), 'Meta Ads Dashboard: importAdCreatives crashed',
       'importAdCreatives() threw an uncaught exception: ' + (e && e.message ? e.message : String(e)) +
-      '\n\nIf the message mentions "Exceeded maximum execution time": check the [timing] lines in View > ' +
-      'Executions > importAdCreatives\'s log FIRST — they show elapsed time at (1) end of /ads pagination, ' +
-      '(2) end of video native-frame lookup, (3) end of image full-res lookup, so you can see which phase ' +
-      'actually ran out the clock instead of guessing.\n\n' +
-      'CORRECTED (Sep 2026): a smaller `limit` in the pagination params does NOT help this — total per-image ' +
-      'thumbnail-resize cost scales with your total ad count, not page size, so a smaller limit only means ' +
-      'MORE pages (more round-trips + more Utilities.sleep time), making a timeout WORSE, not better. That ' +
-      'knob is for the DIFFERENT "reduce the amount of data you\'re asking for" response-size error, not this one.\n\n' +
-      'If checkpoint 1 (pagination) alone is eating most of the 6 minutes: that scales with total ad count and ' +
-      'is not fixable by tuning caps here — it needs its own trigger, separate from the video/image enrichment.\n' +
+      '\n\nNote: pagination is now resumable across runs (Sep 2026) — if this was a timeout mid-pagination, this ' +
+      'catch block would not even run (a platform timeout is not a catchable exception), so seeing this email at ' +
+      'all means something else went wrong: a genuine uncaught error, most likely during the enrichment/final-write ' +
+      'phase after pagination completed. Any staged progress and saved cursor are untouched either way — the next ' +
+      'scheduled run will pick back up automatically without you needing to do anything.' +
+      '\n\nCheck View > Executions > importAdCreatives in the Apps Script editor for the full stack trace and the ' +
+      '[timing] log lines, which show elapsed time at (1) end of /ads pagination this run, (2) end of video ' +
+      'native-frame lookup, (3) end of image full-res lookup, so you can see which phase actually ran into trouble.\n\n' +
       'If checkpoints 2/3 (video or image lookups) account for most of the time: the per-run caps just below ' +
       'each one (currently 20 videos / 50 hashes) are the lever — lower them further, and run ' +
-      'enrichVideoThumbnailCache() / enrichImageFullCache() manually first to clear backlog outside this budget.\n\n' +
-      'Otherwise check View > Executions > importAdCreatives in the Apps Script editor for the full stack trace.');
+      'enrichVideoThumbnailCache() / enrichImageFullCache() manually first to clear backlog outside this budget.');
   } catch (mailErr) {
     Logger.log('(Could not send the crash email — Logger above still has it. Reason: ' + mailErr.message + ')');
   }
